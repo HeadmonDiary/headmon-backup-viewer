@@ -17,11 +17,12 @@ exports.
 2. Verify the expected files and attachment SHA-256 checksums.
 3. Browse and search diary entries with distinct migraine, headache, aura-only,
    skipped, and headache-free states.
-4. Inspect day-level weather, medication records, and locally loaded photos.
-5. Edit day notes and full episode details, including times, intensity,
-   classification, symptoms, triggers, and notes.
-6. Switch between Headmon's dark and light visual themes.
-7. Export a validated, corrected, uncompressed ZIP that preserves the
+4. Correct day status, stress, notes, recorded weather/place, and day triggers.
+5. Add, edit, and remove episode and medication records.
+6. Pick triggers from the backed-up catalogue while keeping free-form trigger entry.
+7. Correct photo captions without changing the original image bytes.
+8. Switch between Headmon's dark and light visual themes.
+9. Export a validated, corrected, uncompressed ZIP that preserves the
    remaining files.
 
 ## Local development

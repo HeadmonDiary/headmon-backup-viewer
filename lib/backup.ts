@@ -54,6 +54,21 @@ export interface BackupMedication {
   helped?: boolean;
 }
 
+export interface BackupTriggerDefinition {
+  name: string;
+  emoji?: string | null;
+  isBuiltIn: boolean;
+  isHidden: boolean;
+}
+
+export interface BackupMedicationDefinition {
+  name: string;
+  emoji: string;
+  defaultDoseMg?: number;
+  isBuiltIn: boolean;
+  isHidden: boolean;
+}
+
 export interface BackupDay {
   date: string;
   hadHeadache: boolean;
@@ -84,8 +99,8 @@ export interface PortableDiary {
   exportedAtEpochMillis: number;
   sourcePlatform: string;
   days: BackupDay[];
-  triggerCatalog: unknown[];
-  medicationCatalog: unknown[];
+  triggerCatalog: BackupTriggerDefinition[];
+  medicationCatalog: BackupMedicationDefinition[];
   omittedAttachmentCount: number;
   [key: string]: unknown;
 }
@@ -210,6 +225,20 @@ function validateManifest(value: unknown): BackupManifest {
   }
   if (!Array.isArray(manifest.attachments)) {
     issues.push("The attachment manifest is missing.");
+  } else {
+    for (const attachment of manifest.attachments) {
+      if (
+        !isObject(attachment) ||
+        typeof attachment.id !== "string" ||
+        !isIsoDate(attachment.date) ||
+        (attachment.episodeIndex !== null &&
+          (!Number.isInteger(attachment.episodeIndex) || attachment.episodeIndex < 0)) ||
+        typeof attachment.note !== "string" ||
+        attachment.note.length > 500
+      ) {
+        issues.push("The attachment manifest contains invalid values.");
+      }
+    }
   }
   if (issues.length) throw new BackupValidationError(issues);
   return manifest;
@@ -227,11 +256,14 @@ function validateDiary(value: unknown): PortableDiary {
   if (![1, 2].includes(diary.formatVersion)) {
     issues.push("The diary format version is not supported.");
   }
+  if (!Array.isArray(diary.triggerCatalog)) diary.triggerCatalog = [];
+  if (!Array.isArray(diary.medicationCatalog)) diary.medicationCatalog = [];
   if (!Array.isArray(diary.days)) {
     issues.push("The diary has no day list.");
   } else {
     const dates = new Set<string>();
     const episodeIds = new Set<string>();
+    const medicationIds = new Set<string>();
     diary.days.forEach((day, index) => {
       if (!isObject(day) || !isIsoDate(day.date)) {
         issues.push(`Day ${index + 1} has an invalid date.`);
@@ -244,6 +276,36 @@ function validateDiary(value: unknown): PortableDiary {
       }
       if (typeof day.note !== "string" || day.note.length > 10_000) {
         issues.push(`Day ${index + 1} has an invalid note.`);
+      }
+      if (
+        day.stressLevel != null &&
+        (!Number.isInteger(day.stressLevel) || day.stressLevel < 0 || day.stressLevel > 10)
+      ) {
+        issues.push(`Day ${index + 1} has an invalid stress level.`);
+      }
+      if (day.hadHeadache && day.isSkipped) {
+        issues.push(`Day ${index + 1} cannot be both skipped and a headache day.`);
+      }
+      if (
+        typeof day.locationName !== "string" ||
+        day.locationName.length > 200 ||
+        typeof day.weatherCondition !== "string" ||
+        day.weatherCondition.length > 200 ||
+        typeof day.pressureTrend !== "string" ||
+        day.pressureTrend.length > 200
+      ) {
+        issues.push(`Day ${index + 1} has invalid context labels.`);
+      }
+      if (
+        [day.temperatureCelsius, day.airPressureHpa, day.windSpeed, day.uvIndex, day.temperatureDelta]
+          .some((measurement) => measurement != null && !Number.isFinite(measurement)) ||
+        (day.humidityPercent != null && (!Number.isInteger(day.humidityPercent) || day.humidityPercent < 0 || day.humidityPercent > 100)) ||
+        (day.airQualityIndex != null && (!Number.isInteger(day.airQualityIndex) || day.airQualityIndex < 0))
+      ) {
+        issues.push(`Day ${index + 1} has invalid weather values.`);
+      }
+      if (Array.isArray(day.triggers) && (new Set(day.triggers).size !== day.triggers.length || day.triggers.some((trigger) => typeof trigger !== "string" || trigger.length === 0 || trigger.length > 200))) {
+        issues.push(`Day ${index + 1} has an invalid trigger.`);
       }
       if (Array.isArray(day.episodes)) {
         day.episodes.forEach((episode) => {
@@ -283,11 +345,36 @@ function validateDiary(value: unknown): PortableDiary {
           ) {
             issues.push("An episode contains invalid values.");
           }
+          if (!Array.isArray(episode.triggers) || new Set(episode.triggers).size !== episode.triggers.length || episode.triggers.some((trigger) => typeof trigger !== "string" || trigger.length === 0 || trigger.length > 200)) {
+            issues.push("An episode contains an invalid trigger.");
+          }
           episodeIds.add(episode.id);
         });
         const hasPainEpisode = day.episodes.some((episode) => !episode.isAuraOnly);
         if (day.hadHeadache !== hasPainEpisode) {
           issues.push(`Day ${index + 1} does not match its episode records.`);
+        }
+      }
+      if (Array.isArray(day.medications)) {
+        for (const medication of day.medications) {
+          if (
+            !isObject(medication) ||
+            typeof medication.id !== "string" ||
+            medication.id.length === 0 ||
+            medicationIds.has(medication.id) ||
+            typeof medication.name !== "string" ||
+            medication.name.trim().length === 0 ||
+            medication.name.length > 200 ||
+            (medication.doseMg != null &&
+              (!Number.isInteger(medication.doseMg) || medication.doseMg < 0 || medication.doseMg > 99_999)) ||
+            (medication.takenAtEpochMillis != null &&
+              (!Number.isFinite(medication.takenAtEpochMillis) || medication.takenAtEpochMillis <= 0)) ||
+            (medication.episodeId != null &&
+              !day.episodes.some((episode) => episode.id === medication.episodeId))
+          ) {
+            issues.push(`Day ${index + 1} has an invalid medication record.`);
+          }
+          medicationIds.add(medication.id);
         }
       }
     });
@@ -384,10 +471,26 @@ export async function openBackup(file: File): Promise<BackupBundle> {
   };
 }
 
-export function exportBackup(bundle: BackupBundle, diary: PortableDiary): Blob {
+export function exportBackup(
+  bundle: BackupBundle,
+  diary: PortableDiary,
+  manifest: BackupManifest = bundle.manifest,
+  weather: WeatherRecord[] = bundle.weather,
+): Blob {
   validateDiary(diary);
+  validateManifest(manifest);
+
+  for (const attachment of manifest.attachments) {
+    const episodeCount = diary.days.find((day) => day.date === attachment.date)?.episodes.length ?? 0;
+    if (attachment.episodeIndex !== null && attachment.episodeIndex >= episodeCount) {
+      throw new BackupValidationError(["A photo points to an episode that does not exist."]);
+    }
+  }
+
   const entries = { ...bundle.entries };
-  entries[bundle.manifest.diaryPath] = strToU8(`${JSON.stringify(diary, null, 2)}\n`);
+  entries["manifest.json"] = strToU8(`${JSON.stringify(manifest, null, 2)}\n`);
+  entries[manifest.diaryPath] = strToU8(`${JSON.stringify(diary, null, 2)}\n`);
+  entries[manifest.weatherHistoryPath] = strToU8(`${JSON.stringify(weather, null, 2)}\n`);
   const archive = zipSync(entries, { level: 0 });
   const bytes = archive.buffer.slice(
     archive.byteOffset,

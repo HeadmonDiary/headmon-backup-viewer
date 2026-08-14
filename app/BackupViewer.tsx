@@ -12,7 +12,10 @@ import {
   BackupValidationError,
   type BackupBundle,
   type BackupDay,
+  type BackupManifest,
+  type BackupTriggerDefinition,
   type PortableDiary,
+  type WeatherRecord,
   correctedFileName,
   exportBackup,
   openBackup,
@@ -63,6 +66,97 @@ function cloneDiary(diary: PortableDiary): PortableDiary {
   return structuredClone(diary);
 }
 
+function uniqueLabels(value: string): string[] {
+  return [...new Set(value.split(",").map((label) => label.trim()).filter(Boolean))];
+}
+
+function optionalNumber(value: string): number | undefined {
+  if (value.trim() === "") return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function newStableId(kind: "episode" | "medication"): string {
+  return `headmon-${kind}:web:${crypto.randomUUID()}`;
+}
+
+function middayFor(date: string): number {
+  return new Date(`${date}T12:00:00`).getTime();
+}
+
+function TriggerEditor({
+  id,
+  label,
+  value,
+  catalog,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: string[];
+  catalog: BackupTriggerDefinition[];
+  onChange: (value: string[]) => void;
+}) {
+  const [customEntry, setCustomEntry] = useState("");
+  const choices = catalog.filter(
+    (trigger) =>
+      trigger.name !== "Other..." && (!trigger.isHidden || value.includes(trigger.name)),
+  );
+  const catalogNames = new Set(catalog.map((trigger) => trigger.name.toLocaleLowerCase()));
+  const customLabels = value.filter(
+    (trigger) => !catalogNames.has(trigger.toLocaleLowerCase()),
+  );
+
+  function toggle(name: string) {
+    onChange(
+      value.includes(name)
+        ? value.filter((trigger) => trigger !== name)
+        : [...value, name],
+    );
+  }
+
+  function addCustomTriggers() {
+    const additions = uniqueLabels(customEntry).filter((trigger) => trigger.length <= 200);
+    if (additions.length === 0) return;
+    onChange([...new Set([...value, ...additions])]);
+    setCustomEntry("");
+  }
+
+  return (
+    <div className="trigger-editor">
+      <span className="field-label">{label}</span>
+      {choices.length > 0 && (
+        <div className="choice-grid" aria-label={`${label} quick choices`}>
+          {choices.map((trigger) => (
+            <button
+              className={value.includes(trigger.name) ? "choice-chip is-selected" : "choice-chip"}
+              type="button"
+              aria-pressed={value.includes(trigger.name)}
+              key={trigger.name}
+              onClick={() => toggle(trigger.name)}
+            >
+              {trigger.emoji && <span aria-hidden="true">{trigger.emoji}</span>}
+              {trigger.name}
+            </button>
+          ))}
+        </div>
+      )}
+      {customLabels.length > 0 && (
+        <div className="custom-trigger-row" aria-label="Custom triggers">
+          {customLabels.map((trigger) => <button className="choice-chip is-selected" type="button" key={trigger} onClick={() => toggle(trigger)}>{trigger}<span aria-hidden="true">×</span></button>)}
+        </div>
+      )}
+      <form className="custom-trigger-form" onSubmit={(event) => { event.preventDefault(); addCustomTriggers(); }}>
+        <label className="control-field" htmlFor={id}>
+          <span>Custom trigger (one or a comma-separated list)</span>
+          <input id={id} type="text" value={customEntry} maxLength={1_000} placeholder="Add your own…" onChange={(event) => setCustomEntry(event.target.value)} />
+        </label>
+        <button className="compact-button" type="submit" disabled={!customEntry.trim()}>Add</button>
+      </form>
+    </div>
+  );
+}
+
 function LocalBackupImage({
   bytes,
   mimeType,
@@ -92,6 +186,8 @@ export default function BackupViewer() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [bundle, setBundle] = useState<BackupBundle | null>(null);
   const [diary, setDiary] = useState<PortableDiary | null>(null);
+  const [manifest, setManifest] = useState<BackupManifest | null>(null);
+  const [weather, setWeather] = useState<WeatherRecord[]>([]);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
@@ -124,12 +220,12 @@ export default function BackupViewer() {
 
   const selectedDay = diary?.days.find((day) => day.date === selectedDate) ?? null;
   const selectedAttachments = useMemo(
-    () => bundle?.manifest.attachments.filter((attachment) => attachment.date === selectedDate) ?? [],
-    [bundle, selectedDate],
+    () => manifest?.attachments.filter((attachment) => attachment.date === selectedDate) ?? [],
+    [manifest, selectedDate],
   );
   const selectedWeather = useMemo(() => {
     if (!selectedDay) return null;
-    const history = bundle?.weather.find((record) => record.date === selectedDay.date);
+    const history = weather.find((record) => record.date === selectedDay.date);
     return {
       temperatureCelsius: history?.temperatureCelsius ?? selectedDay.temperatureCelsius,
       temperatureMin: history?.temperatureMin,
@@ -147,7 +243,7 @@ export default function BackupViewer() {
       airQualityIndex: history?.airQualityIndex ?? selectedDay.airQualityIndex,
       locationName: history?.locationName || selectedDay.locationName,
     };
-  }, [bundle, selectedDay]);
+  }, [selectedDay, weather]);
   const hasSelectedWeather = Boolean(
     selectedWeather &&
       [
@@ -169,10 +265,10 @@ export default function BackupViewer() {
       migraineDays: days.filter((day) => day.episodes.some((episode) => episode.isMigraine)).length,
       headacheOnlyDays: days.filter((day) => day.hadHeadache && !day.episodes.some((episode) => episode.isMigraine)).length,
       episodes: days.reduce((sum, day) => sum + day.episodes.length, 0),
-      photos: bundle?.manifest.attachments.length ?? 0,
-      weather: bundle?.weather.length ?? 0,
+      photos: manifest?.attachments.length ?? 0,
+      weather: weather.length,
     };
-  }, [bundle, diary]);
+  }, [diary, manifest, weather]);
 
   async function loadFile(file: File | undefined) {
     if (!file) return;
@@ -184,12 +280,16 @@ export default function BackupViewer() {
       const newestDate = [...nextDiary.days].sort((a, b) => b.date.localeCompare(a.date))[0]?.date ?? null;
       setBundle(opened);
       setDiary(nextDiary);
+      setManifest(structuredClone(opened.manifest));
+      setWeather(structuredClone(opened.weather));
       setSelectedDate(newestDate);
       setSearch("");
       setDirty(false);
     } catch (caught) {
       setBundle(null);
       setDiary(null);
+      setManifest(null);
+      setWeather([]);
       setSelectedDate(null);
       setError(
         caught instanceof BackupValidationError
@@ -240,16 +340,150 @@ export default function BackupViewer() {
     }));
   }
 
+  function addEpisode() {
+    if (!selectedDay) return;
+    const start = middayFor(selectedDay.date);
+    updateDay((day) => ({
+      ...day,
+      isSkipped: false,
+      episodes: [
+        ...day.episodes,
+        {
+          id: newStableId("episode"),
+          startTimeEpochMillis: start,
+          endTimeEpochMillis: start + 60 * 60 * 1_000,
+          peakPainLevel: 4,
+          isMigraine: false,
+          migraineIntensity: 0,
+          hadAura: false,
+          hadNausea: false,
+          lightSensitivity: false,
+          soundSensitivity: false,
+          migraineMedicationHelped: false,
+          note: "",
+          isAuraOnly: false,
+          triggers: [],
+        },
+      ],
+    }));
+  }
+
+  function removeEpisode(episodeIndex: number) {
+    if (!selectedDay) return;
+    const removedId = selectedDay.episodes[episodeIndex]?.id;
+    updateDay((day) => ({
+      ...day,
+      episodes: day.episodes.filter((_, index) => index !== episodeIndex),
+      medications: day.medications.map((medication) =>
+        medication.episodeId === removedId
+          ? { ...medication, episodeId: undefined }
+          : medication,
+      ),
+    }));
+    setManifest((current) =>
+      current
+        ? {
+            ...current,
+            attachments: current.attachments.map((attachment) => {
+              if (attachment.date !== selectedDay.date || attachment.episodeIndex === null) {
+                return attachment;
+              }
+              if (attachment.episodeIndex === episodeIndex) {
+                return { ...attachment, episodeIndex: null };
+              }
+              if (attachment.episodeIndex > episodeIndex) {
+                return { ...attachment, episodeIndex: attachment.episodeIndex - 1 };
+              }
+              return attachment;
+            }),
+          }
+        : current,
+    );
+  }
+
+  function updateMedication(
+    medicationIndex: number,
+    updater: (medication: BackupDay["medications"][number]) => BackupDay["medications"][number],
+  ) {
+    updateDay((day) => ({
+      ...day,
+      medications: day.medications.map((medication, index) =>
+        index === medicationIndex ? updater(medication) : medication,
+      ),
+    }));
+  }
+
+  function addMedication() {
+    if (!selectedDay || !diary) return;
+    const first = diary.medicationCatalog.find((item) => !item.isHidden);
+    updateDay((day) => ({
+      ...day,
+      medications: [
+        ...day.medications,
+        {
+          id: newStableId("medication"),
+          name: first?.name ?? "Medication",
+          doseMg: first?.defaultDoseMg,
+          takenAtEpochMillis: middayFor(day.date),
+        },
+      ],
+    }));
+  }
+
+  function removeMedication(medicationIndex: number) {
+    updateDay((day) => ({
+      ...day,
+      medications: day.medications.filter((_, index) => index !== medicationIndex),
+    }));
+  }
+
+  type EditableWeatherKey =
+    | "locationName"
+    | "weatherCondition"
+    | "temperatureCelsius"
+    | "airPressureHpa"
+    | "humidityPercent"
+    | "windSpeed"
+    | "uvIndex"
+    | "airQualityIndex"
+    | "pressureTrend";
+
+  function updateWeatherValue(key: EditableWeatherKey, value: string | number | undefined) {
+    if (!selectedDate) return;
+    updateDay((day) => ({ ...day, [key]: value }));
+    setWeather((current) =>
+      current.map((record) =>
+        record.date === selectedDate ? { ...record, [key]: value } : record,
+      ),
+    );
+  }
+
+  function updateAttachmentNote(attachmentId: string, note: string) {
+    setManifest((current) =>
+      current
+        ? {
+            ...current,
+            attachments: current.attachments.map((attachment) =>
+              attachment.id === attachmentId ? { ...attachment, note } : attachment,
+            ),
+          }
+        : current,
+    );
+    setDirty(true);
+  }
+
   function discardChanges() {
     if (!bundle) return;
     setDiary(cloneDiary(bundle.diary));
+    setManifest(structuredClone(bundle.manifest));
+    setWeather(structuredClone(bundle.weather));
     setDirty(false);
   }
 
   function downloadCorrectedBackup() {
-    if (!bundle || !diary) return;
+    if (!bundle || !diary || !manifest) return;
     try {
-      const blob = exportBackup(bundle, diary);
+      const blob = exportBackup(bundle, diary, manifest, weather);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -269,6 +503,8 @@ export default function BackupViewer() {
   function closeBackup() {
     setBundle(null);
     setDiary(null);
+    setManifest(null);
+    setWeather([]);
     setSelectedDate(null);
     setDirty(false);
     setError(null);
@@ -296,7 +532,7 @@ export default function BackupViewer() {
           <div className="welcome-copy">
             <p className="eyebrow">PRIVATE BACKUP TOOL</p>
             <h1>See what your diary remembers.</h1>
-            <p className="welcome-intro">Open a complete Headmon backup to browse your history, inspect photos, and correct written notes. Your archive never leaves this device.</p>
+            <p className="welcome-intro">Open a complete Headmon backup to browse your history and correct days, episodes, medication, triggers, weather, and photo captions. Your archive never leaves this device.</p>
             <div className="trust-row" aria-label="Privacy guarantees"><span>No account</span><span>No upload</span><span>Original stays untouched</span></div>
           </div>
 
@@ -376,10 +612,26 @@ export default function BackupViewer() {
                     <div className="editor-heading">
                       <div>
                         <div className="date-and-status"><h2>{formatDate(selectedDay.date)}</h2><span className={`status-badge ${statusFor(selectedDay).tone}`}>{statusFor(selectedDay).label}</span></div>
-                        <p>{selectedDay.locationName || "No location"}{selectedDay.stressLevel != null ? ` · Stress ${selectedDay.stressLevel}/5` : ""}</p>
+                        <p>{selectedDay.locationName || "No location"}{selectedDay.stressLevel != null ? ` · Stress ${selectedDay.stressLevel}/10` : ""}</p>
                       </div>
                       {dirty && <span className="changed-badge">Modified</span>}
                     </div>
+
+                    <section className="editor-section">
+                      <div className="section-title"><h3>Day details</h3><span aria-hidden="true">☀</span></div>
+                      <div className="day-detail-grid">
+                        <label className="control-field"><span>Stress (0–10, blank if unset)</span><input type="number" min="0" max="10" value={selectedDay.stressLevel ?? ""} onChange={(event) => updateDay((day) => ({ ...day, stressLevel: optionalNumber(event.target.value) }))} /></label>
+                        <label className="check-control day-skip"><input type="checkbox" checked={selectedDay.isSkipped} disabled={selectedDay.episodes.length > 0} onChange={(event) => updateDay((day) => ({ ...day, isSkipped: event.target.checked }))} /><span>Marked as skipped</span></label>
+                      </div>
+                      {selectedDay.episodes.length > 0 && <p className="field-help">A day with episodes cannot also be skipped.</p>}
+                      <TriggerEditor
+                        id={`day-triggers-${selectedDay.date}`}
+                        label="Day triggers"
+                        value={selectedDay.triggers}
+                        catalog={diary.triggerCatalog}
+                        onChange={(triggers) => updateDay((day) => ({ ...day, triggers }))}
+                      />
+                    </section>
 
                     <section className="editor-section">
                       <label className="field-label" htmlFor="day-note">Day note</label>
@@ -403,17 +655,34 @@ export default function BackupViewer() {
                           </div>
                         </>
                       ) : <p className="weather-empty">No weather was recorded for this day.</p>}
+                      {selectedWeather && (
+                        <details className="context-editor">
+                          <summary>Correct recorded weather or place</summary>
+                          <p>This edits values already stored in the backup. It does not look up a new location or fetch weather.</p>
+                          <div className="context-form-grid">
+                            <label className="control-field wide-field"><span>Place label</span><input type="text" value={selectedWeather.locationName ?? ""} onChange={(event) => updateWeatherValue("locationName", event.target.value)} /></label>
+                            <label className="control-field wide-field"><span>Condition</span><input type="text" value={selectedWeather.weatherCondition ?? ""} onChange={(event) => updateWeatherValue("weatherCondition", event.target.value)} /></label>
+                            <label className="control-field"><span>Temperature °C</span><input type="number" step="0.1" value={selectedWeather.temperatureCelsius ?? ""} onChange={(event) => updateWeatherValue("temperatureCelsius", optionalNumber(event.target.value))} /></label>
+                            <label className="control-field"><span>Pressure hPa</span><input type="number" step="0.1" value={selectedWeather.airPressureHpa ?? ""} onChange={(event) => updateWeatherValue("airPressureHpa", optionalNumber(event.target.value))} /></label>
+                            <label className="control-field"><span>Humidity %</span><input type="number" min="0" max="100" value={selectedWeather.humidityPercent ?? ""} onChange={(event) => updateWeatherValue("humidityPercent", optionalNumber(event.target.value))} /></label>
+                            <label className="control-field"><span>Wind m/s</span><input type="number" min="0" step="0.1" value={selectedWeather.windSpeed ?? ""} onChange={(event) => updateWeatherValue("windSpeed", optionalNumber(event.target.value))} /></label>
+                            <label className="control-field"><span>UV index</span><input type="number" min="0" step="0.1" value={selectedWeather.uvIndex ?? ""} onChange={(event) => updateWeatherValue("uvIndex", optionalNumber(event.target.value))} /></label>
+                            <label className="control-field"><span>Air quality index</span><input type="number" min="0" value={selectedWeather.airQualityIndex ?? ""} onChange={(event) => updateWeatherValue("airQualityIndex", optionalNumber(event.target.value))} /></label>
+                            <label className="control-field wide-field"><span>Pressure trend</span><input type="text" value={selectedWeather.pressureTrend ?? ""} onChange={(event) => updateWeatherValue("pressureTrend", event.target.value)} /></label>
+                          </div>
+                        </details>
+                      )}
                     </section>
 
-                    {selectedDay.episodes.length > 0 && (
-                      <section className="editor-section">
-                        <div className="section-title"><h3>Episodes</h3><span>{selectedDay.episodes.length}</span></div>
+                    <section className="editor-section">
+                        <div className="section-title section-title-actions"><div><h3>Episodes</h3><span>{selectedDay.episodes.length}</span></div><button className="compact-button" type="button" onClick={addEpisode}>Add episode</button></div>
+                        {selectedDay.episodes.length === 0 && <p className="section-empty">No episodes on this day.</p>}
                         <div className="episode-stack">
                           {selectedDay.episodes.map((episode, episodeIndex) => (
                             <div className="episode-card" key={episode.id}>
                               <div className="episode-summary">
-                                <strong>{episode.isAuraOnly ? "Aura only" : episode.isMigraine ? "Migraine" : "Headache"}</strong>
-                                <span>{formatTime(episode.startTimeEpochMillis)}–{formatTime(episode.endTimeEpochMillis)}</span>
+                                <div><strong>{episode.isAuraOnly ? "Aura only" : episode.isMigraine ? "Migraine" : "Headache"}</strong><span>{formatTime(episode.startTimeEpochMillis)}–{formatTime(episode.endTimeEpochMillis)}</span></div>
+                                <button className="danger-button" type="button" onClick={() => removeEpisode(episodeIndex)}>Remove episode</button>
                               </div>
                               <div className="episode-form-grid">
                                 <label className="control-field"><span>Starts</span><input type="datetime-local" value={dateTimeInputValue(episode.startTimeEpochMillis)} onChange={(event) => {
@@ -447,7 +716,13 @@ export default function BackupViewer() {
                                 <label className="check-control"><input type="checkbox" checked={episode.migraineMedicationHelped} disabled={!episode.isMigraine} onChange={(event) => updateEpisode(episodeIndex, (item) => ({ ...item, migraineMedicationHelped: event.target.checked }))} /><span>Migraine medicine helped</span></label>
                               </div>
 
-                              <label className="control-field trigger-field" htmlFor={`episode-triggers-${episode.id}`}><span>Triggers</span><input id={`episode-triggers-${episode.id}`} type="text" value={episode.triggers.join(", ")} placeholder="Stress, sleep, weather…" onChange={(event) => updateEpisode(episodeIndex, (item) => ({ ...item, triggers: [...new Set(event.target.value.split(",").map((value) => value.trim()).filter(Boolean))] }))} /></label>
+                              <TriggerEditor
+                                id={`episode-triggers-${episode.id}`}
+                                label="Episode triggers"
+                                value={episode.triggers}
+                                catalog={diary.triggerCatalog}
+                                onChange={(triggers) => updateEpisode(episodeIndex, (item) => ({ ...item, triggers }))}
+                              />
                               <label className="field-label" htmlFor={`episode-note-${episode.id}`}>Episode note</label>
                               <textarea
                                 id={`episode-note-${episode.id}`}
@@ -461,18 +736,38 @@ export default function BackupViewer() {
                           ))}
                         </div>
                       </section>
-                    )}
 
-                    {selectedDay.medications.length > 0 && (
-                      <section className="editor-section">
-                        <div className="section-title"><h3>Medication</h3><span>{selectedDay.medications.length}</span></div>
-                        <div className="medication-list">
-                          {selectedDay.medications.map((medication) => (
-                            <div key={medication.id}><strong>{medication.name}</strong><span>{medication.doseMg != null ? `${medication.doseMg} mg` : "Dose not recorded"}{medication.takenAtEpochMillis ? ` · ${formatTime(medication.takenAtEpochMillis)}` : ""}</span></div>
-                          ))}
-                        </div>
-                      </section>
-                    )}
+                    <section className="editor-section">
+                      <div className="section-title section-title-actions"><div><h3>Medication</h3><span>{selectedDay.medications.length}</span></div><button className="compact-button" type="button" onClick={addMedication}>Add medication</button></div>
+                      <datalist id="medication-catalog">
+                        {diary.medicationCatalog.filter((item) => !item.isHidden).map((item) => <option value={item.name} key={item.name}>{item.emoji} {item.name}</option>)}
+                      </datalist>
+                      {selectedDay.medications.length === 0 && <p className="section-empty">No medication recorded for this day.</p>}
+                      <div className="medication-editor-list">
+                        {selectedDay.medications.map((medication, medicationIndex) => (
+                          <div className="medication-card" key={medication.id}>
+                            <div className="medication-card-heading"><strong>{medication.name || "Medication"}</strong><button className="danger-button" type="button" onClick={() => removeMedication(medicationIndex)}>Remove</button></div>
+                            <div className="context-form-grid">
+                              <label className="control-field wide-field"><span>Medicine (catalogue or custom)</span><input list="medication-catalog" value={medication.name} maxLength={200} onChange={(event) => {
+                                const name = event.target.value;
+                                const definition = diary.medicationCatalog.find((item) => item.name === name);
+                                updateMedication(medicationIndex, (item) => ({ ...item, name, doseMg: item.doseMg ?? definition?.defaultDoseMg }));
+                              }} /></label>
+                              <label className="control-field"><span>Dose (mg)</span><input type="number" min="0" max="99999" value={medication.doseMg ?? ""} onChange={(event) => updateMedication(medicationIndex, (item) => ({ ...item, doseMg: optionalNumber(event.target.value) }))} /></label>
+                              <label className="control-field"><span>Taken at</span><input type="datetime-local" value={dateTimeInputValue(medication.takenAtEpochMillis ?? 0)} onChange={(event) => {
+                                const takenAt = new Date(event.target.value).getTime();
+                                updateMedication(medicationIndex, (item) => ({ ...item, takenAtEpochMillis: Number.isFinite(takenAt) ? takenAt : undefined }));
+                              }} /></label>
+                              <label className="control-field wide-field"><span>Linked to</span><select value={medication.episodeId ?? ""} onChange={(event) => updateMedication(medicationIndex, (item) => ({ ...item, episodeId: event.target.value || undefined }))}>
+                                <option value="">The day (no specific episode)</option>
+                                {selectedDay.episodes.map((episode, index) => <option value={episode.id} key={episode.id}>Episode {index + 1} · {formatTime(episode.startTimeEpochMillis)}</option>)}
+                              </select></label>
+                            </div>
+                            <label className="check-control"><input type="checkbox" checked={medication.helped ?? false} onChange={(event) => updateMedication(medicationIndex, (item) => ({ ...item, helped: event.target.checked }))} /><span>Medication helped</span></label>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
 
                     {selectedAttachments.length > 0 && (
                       <section className="editor-section">
@@ -487,7 +782,7 @@ export default function BackupViewer() {
                                   alt={attachment.note || "Backup attachment"}
                                 />
                               ) : <div className="photo-placeholder">Preview unavailable</div>}
-                              <figcaption>{attachment.note || "Untitled photo"}</figcaption>
+                              <figcaption><label className="control-field" htmlFor={`photo-note-${attachment.id}`}><span>Photo caption</span><input id={`photo-note-${attachment.id}`} value={attachment.note} maxLength={500} placeholder="Untitled photo" onChange={(event) => updateAttachmentNote(attachment.id, event.target.value)} /></label></figcaption>
                             </figure>
                           ))}
                         </div>
