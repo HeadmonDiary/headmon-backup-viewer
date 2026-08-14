@@ -1,8 +1,48 @@
-node_modules/
-dist/
-.DS_Store
-*.headmon-backup.zip
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# Headmon archives contain sensitive health information.
+*.zip
 *.headmon-backup.json
-.env
-.env.*
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/.vinext/
+/out/
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
 !.env.example
+
+# vercel
+.vercel
+
+# typescript
+next-env.d.ts
+*.tsbuildinfo
+/dist/
+/.wrangler/
+/outputs/
+/work/
