@@ -40,8 +40,21 @@ function formatTime(epochMillis: number): string {
   return timeFormatter.format(new Date(epochMillis));
 }
 
+function dateTimeInputValue(epochMillis: number): string {
+  if (!epochMillis || epochMillis < 0) return "";
+  const date = new Date(epochMillis);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
 function statusFor(day: BackupDay): { label: string; tone: string } {
   if (day.isSkipped) return { label: "Skipped", tone: "neutral" };
+  if (day.episodes.some((episode) => episode.isMigraine)) {
+    return { label: "Migraine", tone: "migraine" };
+  }
+  if (day.episodes.length > 0 && day.episodes.every((episode) => episode.isAuraOnly)) {
+    return { label: "Aura only", tone: "aura" };
+  }
   if (day.hadHeadache) return { label: "Headache", tone: "pain" };
   return { label: "Headache-free", tone: "clear" };
 }
@@ -76,6 +89,7 @@ function LocalBackupImage({
 
 export default function BackupViewer() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [bundle, setBundle] = useState<BackupBundle | null>(null);
   const [diary, setDiary] = useState<PortableDiary | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
@@ -113,12 +127,47 @@ export default function BackupViewer() {
     () => bundle?.manifest.attachments.filter((attachment) => attachment.date === selectedDate) ?? [],
     [bundle, selectedDate],
   );
+  const selectedWeather = useMemo(() => {
+    if (!selectedDay) return null;
+    const history = bundle?.weather.find((record) => record.date === selectedDay.date);
+    return {
+      temperatureCelsius: history?.temperatureCelsius ?? selectedDay.temperatureCelsius,
+      temperatureMin: history?.temperatureMin,
+      temperatureMax: history?.temperatureMax,
+      temperatureDelta: history?.temperatureDelta ?? selectedDay.temperatureDelta,
+      airPressureHpa: history?.airPressureHpa ?? selectedDay.airPressureHpa,
+      pressureMin: history?.pressureMin,
+      pressureMax: history?.pressureMax,
+      pressureSwing: history?.pressureSwing,
+      pressureTrend: history?.pressureTrend || selectedDay.pressureTrend,
+      humidityPercent: history?.humidityPercent ?? selectedDay.humidityPercent,
+      windSpeed: history?.windSpeed ?? selectedDay.windSpeed,
+      weatherCondition: history?.weatherCondition || selectedDay.weatherCondition,
+      uvIndex: history?.uvIndex ?? selectedDay.uvIndex,
+      airQualityIndex: history?.airQualityIndex ?? selectedDay.airQualityIndex,
+      locationName: history?.locationName || selectedDay.locationName,
+    };
+  }, [bundle, selectedDay]);
+  const hasSelectedWeather = Boolean(
+    selectedWeather &&
+      [
+        selectedWeather.temperatureCelsius,
+        selectedWeather.airPressureHpa,
+        selectedWeather.humidityPercent,
+        selectedWeather.windSpeed,
+        selectedWeather.weatherCondition,
+        selectedWeather.uvIndex,
+        selectedWeather.airQualityIndex,
+      ].some((value) => value !== undefined && value !== null && value !== ""),
+  );
 
   const stats = useMemo(() => {
     const days = diary?.days ?? [];
     return {
       days: days.length,
       headacheDays: days.filter((day) => day.hadHeadache).length,
+      migraineDays: days.filter((day) => day.episodes.some((episode) => episode.isMigraine)).length,
+      headacheOnlyDays: days.filter((day) => day.hadHeadache && !day.episodes.some((episode) => episode.isMigraine)).length,
       episodes: days.reduce((sum, day) => sum + day.episodes.length, 0),
       photos: bundle?.manifest.attachments.length ?? 0,
       weather: bundle?.weather.length ?? 0,
@@ -167,9 +216,28 @@ export default function BackupViewer() {
     if (!diary || !selectedDate) return;
     setDiary({
       ...diary,
-      days: diary.days.map((day) => (day.date === selectedDate ? updater(day) : day)),
+      days: diary.days.map((day) => {
+        if (day.date !== selectedDate) return day;
+        const updated = updater(day);
+        return {
+          ...updated,
+          hadHeadache: updated.episodes.some((episode) => !episode.isAuraOnly),
+        };
+      }),
     });
     setDirty(true);
+  }
+
+  function updateEpisode(
+    episodeIndex: number,
+    updater: (episode: BackupDay["episodes"][number]) => BackupDay["episodes"][number],
+  ) {
+    updateDay((day) => ({
+      ...day,
+      episodes: day.episodes.map((episode, index) =>
+        index === episodeIndex ? updater(episode) : episode,
+      ),
+    }));
   }
 
   function discardChanges() {
@@ -180,13 +248,22 @@ export default function BackupViewer() {
 
   function downloadCorrectedBackup() {
     if (!bundle || !diary) return;
-    const blob = exportBackup(bundle, diary);
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = correctedFileName(bundle.fileName);
-    anchor.click();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+    try {
+      const blob = exportBackup(bundle, diary);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = correctedFileName(bundle.fileName);
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+      setError(null);
+    } catch (caught) {
+      setError(
+        caught instanceof BackupValidationError
+          ? caught.issues
+          : ["The corrected backup could not be created."],
+      );
+    }
   }
 
   function closeBackup() {
@@ -198,13 +275,20 @@ export default function BackupViewer() {
   }
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" data-theme={theme}>
       <header className="topbar">
         <a className="brand" href="#top" aria-label="Headmon Backup Studio home">
-          <span className="brand-mark" aria-hidden="true">H</span>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img className="brand-logo" src="/headmon-icon.png" alt="" />
           <span><strong>Headmon</strong><small>Backup Studio</small></span>
         </a>
-        <div className="privacy-pill"><span className="privacy-dot" aria-hidden="true" />Processed locally</div>
+        <div className="topbar-actions">
+          <button className="theme-button" type="button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}>
+            <span aria-hidden="true">{theme === "dark" ? "☀" : "◐"}</span>
+            {theme === "dark" ? "Light" : "Dark"}
+          </button>
+          <div className="privacy-pill"><span className="privacy-dot" aria-hidden="true" />Processed locally</div>
+        </div>
       </header>
 
       {!bundle ? (
@@ -266,7 +350,7 @@ export default function BackupViewer() {
 
           <section className="entry-browser">
             <div className="browser-heading">
-              <div><p className="eyebrow">DIARY CONTENTS</p><h1>Your entries</h1><p>{stats.headacheDays} headache days across this backup</p></div>
+              <div><p className="eyebrow">DIARY CONTENTS</p><h1>Your entries</h1><p>{stats.migraineDays} migraine days · {stats.headacheOnlyDays} headache-only days</p></div>
               <label className="search-field"><span className="sr-only">Search entries</span><input value={search} onChange={(event) => setSearch(event.target.value)} type="search" placeholder="Search notes, places, triggers…" /></label>
             </div>
 
@@ -278,7 +362,7 @@ export default function BackupViewer() {
                   return (
                     <button className={`entry-row${day.date === selectedDate ? " is-selected" : ""}`} key={day.date} type="button" onClick={() => setSelectedDate(day.date)}>
                       <span className={`status-mark ${status.tone}`} aria-hidden="true" />
-                      <span className="entry-row-copy"><strong>{formatDate(day.date)}</strong><span>{day.note || day.locationName || status.label}</span></span>
+                      <span className="entry-row-copy"><strong>{formatDate(day.date)}</strong><span>{status.label}{day.locationName ? ` · ${day.locationName}` : day.note ? ` · ${day.note}` : ""}</span></span>
                       <span className="episode-count">{day.episodes.length || "—"}</span>
                     </button>
                   );
@@ -299,8 +383,26 @@ export default function BackupViewer() {
 
                     <section className="editor-section">
                       <label className="field-label" htmlFor="day-note">Day note</label>
-                      <textarea id="day-note" value={selectedDay.note} maxLength={20_000} placeholder="No note for this day" onChange={(event) => updateDay((day) => ({ ...day, note: event.target.value }))} />
+                      <textarea id="day-note" value={selectedDay.note} maxLength={10_000} placeholder="No note for this day" onChange={(event) => updateDay((day) => ({ ...day, note: event.target.value }))} />
                       <div className="field-meta"><span>Saved only when you export a new ZIP</span><span>{selectedDay.note.length.toLocaleString()} characters</span></div>
+                    </section>
+
+                    <section className="editor-section weather-section">
+                      <div className="section-title"><h3>Weather on this day</h3><span aria-hidden="true">☁</span></div>
+                      {hasSelectedWeather && selectedWeather ? (
+                        <>
+                          <div className="weather-lead">
+                            <strong>{selectedWeather.weatherCondition || "Recorded conditions"}</strong>
+                            <span>{selectedWeather.locationName || "Location not named"}</span>
+                          </div>
+                          <div className="weather-grid">
+                            <div><span>Temperature</span><strong>{selectedWeather.temperatureCelsius != null ? `${selectedWeather.temperatureCelsius.toFixed(1)} °C` : "—"}</strong><small>{selectedWeather.temperatureMin != null && selectedWeather.temperatureMax != null ? `${selectedWeather.temperatureMin.toFixed(1)}–${selectedWeather.temperatureMax.toFixed(1)} °C` : "No daily range"}</small></div>
+                            <div><span>Pressure</span><strong>{selectedWeather.airPressureHpa != null ? `${Math.round(selectedWeather.airPressureHpa)} hPa` : "—"}</strong><small>{selectedWeather.pressureTrend || (selectedWeather.pressureSwing != null ? `${selectedWeather.pressureSwing.toFixed(1)} hPa swing` : "No trend")}</small></div>
+                            <div><span>Humidity</span><strong>{selectedWeather.humidityPercent != null ? `${selectedWeather.humidityPercent}%` : "—"}</strong><small>{selectedWeather.windSpeed != null ? `Wind ${selectedWeather.windSpeed.toFixed(1)} m/s` : "No wind reading"}</small></div>
+                            <div><span>UV / air quality</span><strong>{selectedWeather.uvIndex != null ? `UV ${selectedWeather.uvIndex.toFixed(1)}` : "UV —"}</strong><small>{selectedWeather.airQualityIndex != null ? `AQI ${selectedWeather.airQualityIndex}` : "No AQI reading"}</small></div>
+                          </div>
+                        </>
+                      ) : <p className="weather-empty">No weather was recorded for this day.</p>}
                     </section>
 
                     {selectedDay.episodes.length > 0 && (
@@ -309,19 +411,51 @@ export default function BackupViewer() {
                         <div className="episode-stack">
                           {selectedDay.episodes.map((episode, episodeIndex) => (
                             <div className="episode-card" key={episode.id}>
-                              <div className="episode-summary"><strong>{formatTime(episode.startTimeEpochMillis)}–{formatTime(episode.endTimeEpochMillis)}</strong><span>Peak pain {episode.peakPainLevel}/10{episode.isMigraine ? " · Migraine" : ""}</span></div>
-                              {episode.triggers.length > 0 && <div className="tag-row">{episode.triggers.map((trigger) => <span key={trigger}>{trigger}</span>)}</div>}
+                              <div className="episode-summary">
+                                <strong>{episode.isAuraOnly ? "Aura only" : episode.isMigraine ? "Migraine" : "Headache"}</strong>
+                                <span>{formatTime(episode.startTimeEpochMillis)}–{formatTime(episode.endTimeEpochMillis)}</span>
+                              </div>
+                              <div className="episode-form-grid">
+                                <label className="control-field"><span>Starts</span><input type="datetime-local" value={dateTimeInputValue(episode.startTimeEpochMillis)} onChange={(event) => {
+                                  const start = new Date(event.target.value).getTime();
+                                  if (!Number.isFinite(start)) return;
+                                  updateEpisode(episodeIndex, (item) => ({
+                                    ...item,
+                                    startTimeEpochMillis: start,
+                                    endTimeEpochMillis: item.endTimeEpochMillis !== 0 && item.endTimeEpochMillis < start ? start : item.endTimeEpochMillis,
+                                  }));
+                                }} /></label>
+                                <label className="control-field"><span>Ends</span><input type="datetime-local" value={dateTimeInputValue(episode.endTimeEpochMillis)} min={dateTimeInputValue(episode.startTimeEpochMillis)} disabled={episode.endTimeEpochMillis === 0} onChange={(event) => {
+                                  const end = new Date(event.target.value).getTime();
+                                  if (Number.isFinite(end)) updateEpisode(episodeIndex, (item) => ({ ...item, endTimeEpochMillis: end }));
+                                }} /></label>
+                              </div>
+                              <label className="check-control"><input type="checkbox" checked={episode.endTimeEpochMillis === 0} onChange={(event) => updateEpisode(episodeIndex, (item) => ({ ...item, endTimeEpochMillis: event.target.checked ? 0 : Math.max(item.startTimeEpochMillis, Date.now()) }))} /><span>Episode is ongoing</span></label>
+
+                              <div className="episode-form-grid">
+                                <label className="control-field"><span>Peak pain</span><input type="number" min="0" max="10" value={episode.peakPainLevel} disabled={episode.isAuraOnly} onChange={(event) => updateEpisode(episodeIndex, (item) => ({ ...item, peakPainLevel: Math.min(10, Math.max(1, Number(event.target.value))) }))} /></label>
+                                <label className="control-field"><span>Migraine intensity</span><input type="number" min="0" max="10" value={episode.migraineIntensity} disabled={!episode.isMigraine} onChange={(event) => updateEpisode(episodeIndex, (item) => ({ ...item, migraineIntensity: Math.min(10, Math.max(1, Number(event.target.value))) }))} /></label>
+                              </div>
+
+                              <div className="episode-checks">
+                                <label className="check-control"><input type="checkbox" checked={episode.isMigraine} disabled={episode.isAuraOnly} onChange={(event) => updateEpisode(episodeIndex, (item) => event.target.checked ? { ...item, isMigraine: true, isAuraOnly: false, peakPainLevel: Math.max(1, item.peakPainLevel), migraineIntensity: Math.max(1, item.migraineIntensity) } : { ...item, isMigraine: false, migraineIntensity: 0, migraineMedicationHelped: false })} /><span>Migraine</span></label>
+                                <label className="check-control"><input type="checkbox" checked={episode.isAuraOnly} onChange={(event) => updateEpisode(episodeIndex, (item) => event.target.checked ? { ...item, isAuraOnly: true, hadAura: true, peakPainLevel: 0, isMigraine: false, migraineIntensity: 0, migraineMedicationHelped: false } : { ...item, isAuraOnly: false, peakPainLevel: Math.max(1, item.peakPainLevel) })} /><span>Aura only</span></label>
+                                <label className="check-control"><input type="checkbox" checked={episode.hadAura} disabled={episode.isAuraOnly} onChange={(event) => updateEpisode(episodeIndex, (item) => ({ ...item, hadAura: event.target.checked }))} /><span>Aura</span></label>
+                                <label className="check-control"><input type="checkbox" checked={episode.hadNausea} onChange={(event) => updateEpisode(episodeIndex, (item) => ({ ...item, hadNausea: event.target.checked }))} /><span>Nausea</span></label>
+                                <label className="check-control"><input type="checkbox" checked={episode.lightSensitivity} onChange={(event) => updateEpisode(episodeIndex, (item) => ({ ...item, lightSensitivity: event.target.checked }))} /><span>Light sensitivity</span></label>
+                                <label className="check-control"><input type="checkbox" checked={episode.soundSensitivity} onChange={(event) => updateEpisode(episodeIndex, (item) => ({ ...item, soundSensitivity: event.target.checked }))} /><span>Sound sensitivity</span></label>
+                                <label className="check-control"><input type="checkbox" checked={episode.migraineMedicationHelped} disabled={!episode.isMigraine} onChange={(event) => updateEpisode(episodeIndex, (item) => ({ ...item, migraineMedicationHelped: event.target.checked }))} /><span>Migraine medicine helped</span></label>
+                              </div>
+
+                              <label className="control-field trigger-field" htmlFor={`episode-triggers-${episode.id}`}><span>Triggers</span><input id={`episode-triggers-${episode.id}`} type="text" value={episode.triggers.join(", ")} placeholder="Stress, sleep, weather…" onChange={(event) => updateEpisode(episodeIndex, (item) => ({ ...item, triggers: [...new Set(event.target.value.split(",").map((value) => value.trim()).filter(Boolean))] }))} /></label>
                               <label className="field-label" htmlFor={`episode-note-${episode.id}`}>Episode note</label>
                               <textarea
                                 id={`episode-note-${episode.id}`}
                                 className="episode-note"
                                 value={episode.note}
-                                maxLength={20_000}
+                                maxLength={10_000}
                                 placeholder="No note for this episode"
-                                onChange={(event) => updateDay((day) => ({
-                                  ...day,
-                                  episodes: day.episodes.map((item, index) => index === episodeIndex ? { ...item, note: event.target.value } : item),
-                                }))}
+                                onChange={(event) => updateEpisode(episodeIndex, (item) => ({ ...item, note: event.target.value }))}
                               />
                             </div>
                           ))}
@@ -366,7 +500,7 @@ export default function BackupViewer() {
           </section>
 
           <footer className="save-bar">
-            <div><strong>{dirty ? "You have unsaved corrections" : "No changes yet"}</strong><span>The original ZIP will never be overwritten.</span></div>
+            <div><strong>{dirty ? "You have unsaved corrections" : "No changes yet"}</strong>{error ? <span className="save-error">{error[0]}</span> : <span>The original ZIP will never be overwritten.</span>}</div>
             <div className="save-actions"><button className="secondary-button" type="button" onClick={discardChanges} disabled={!dirty}>Discard changes</button><button className="primary-button" type="button" onClick={downloadCorrectedBackup} disabled={!dirty}>Export corrected ZIP</button></div>
           </footer>
         </div>

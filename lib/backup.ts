@@ -60,6 +60,17 @@ export interface BackupDay {
   note: string;
   isSkipped: boolean;
   stressLevel?: number;
+  temperatureCelsius?: number;
+  airPressureHpa?: number;
+  humidityPercent?: number;
+  windSpeed?: number;
+  weatherCondition: string;
+  uvIndex?: number;
+  airQualityIndex?: number;
+  pressureTrend: string;
+  temperatureDelta?: number;
+  latitude?: number;
+  longitude?: number;
   locationName: string;
   triggers: string[];
   episodes: BackupEpisode[];
@@ -81,6 +92,23 @@ export interface PortableDiary {
 
 export interface WeatherRecord {
   date: string;
+  temperatureCelsius?: number;
+  temperatureMin?: number;
+  temperatureMax?: number;
+  temperatureDelta?: number;
+  airPressureHpa?: number;
+  pressureMin?: number;
+  pressureMax?: number;
+  pressureSwing?: number;
+  pressureTrend?: string;
+  humidityPercent?: number;
+  windSpeed?: number;
+  weatherCondition?: string;
+  uvIndex?: number;
+  airQualityIndex?: number;
+  latitude?: number;
+  longitude?: number;
+  locationName?: string;
   [key: string]: unknown;
 }
 
@@ -203,6 +231,7 @@ function validateDiary(value: unknown): PortableDiary {
     issues.push("The diary has no day list.");
   } else {
     const dates = new Set<string>();
+    const episodeIds = new Set<string>();
     diary.days.forEach((day, index) => {
       if (!isObject(day) || !isIsoDate(day.date)) {
         issues.push(`Day ${index + 1} has an invalid date.`);
@@ -213,8 +242,53 @@ function validateDiary(value: unknown): PortableDiary {
       if (!Array.isArray(day.episodes) || !Array.isArray(day.medications) || !Array.isArray(day.triggers)) {
         issues.push(`Day ${index + 1} has invalid nested records.`);
       }
-      if (typeof day.note !== "string" || day.note.length > 20_000) {
+      if (typeof day.note !== "string" || day.note.length > 10_000) {
         issues.push(`Day ${index + 1} has an invalid note.`);
+      }
+      if (Array.isArray(day.episodes)) {
+        day.episodes.forEach((episode) => {
+          const validTimes =
+            Number.isFinite(episode.startTimeEpochMillis) &&
+            episode.startTimeEpochMillis > 0 &&
+            (episode.endTimeEpochMillis === 0 ||
+              episode.endTimeEpochMillis >= episode.startTimeEpochMillis);
+          const validMigraine =
+            episode.isMigraine ||
+            (episode.migraineIntensity === 0 && !episode.migraineMedicationHelped);
+          const validAuraOnly =
+            !episode.isAuraOnly ||
+            (episode.hadAura &&
+              episode.peakPainLevel === 0 &&
+              !episode.isMigraine &&
+              episode.migraineIntensity === 0);
+          const validPain =
+            Number.isInteger(episode.peakPainLevel) &&
+            episode.peakPainLevel >= 0 &&
+            episode.peakPainLevel <= 10 &&
+            (episode.isAuraOnly || episode.peakPainLevel > 0);
+          const validMigraineIntensity =
+            Number.isInteger(episode.migraineIntensity) &&
+            episode.migraineIntensity >= 0 &&
+            episode.migraineIntensity <= 10;
+          if (
+            !episode.id ||
+            episodeIds.has(episode.id) ||
+            !validTimes ||
+            !validPain ||
+            !validMigraine ||
+            !validAuraOnly ||
+            !validMigraineIntensity ||
+            typeof episode.note !== "string" ||
+            episode.note.length > 10_000
+          ) {
+            issues.push("An episode contains invalid values.");
+          }
+          episodeIds.add(episode.id);
+        });
+        const hasPainEpisode = day.episodes.some((episode) => !episode.isAuraOnly);
+        if (day.hadHeadache !== hasPainEpisode) {
+          issues.push(`Day ${index + 1} does not match its episode records.`);
+        }
       }
     });
   }
@@ -311,6 +385,7 @@ export async function openBackup(file: File): Promise<BackupBundle> {
 }
 
 export function exportBackup(bundle: BackupBundle, diary: PortableDiary): Blob {
+  validateDiary(diary);
   const entries = { ...bundle.entries };
   entries[bundle.manifest.diaryPath] = strToU8(`${JSON.stringify(diary, null, 2)}\n`);
   const archive = zipSync(entries, { level: 0 });
