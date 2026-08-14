@@ -231,7 +231,7 @@ function validateManifest(value: unknown): BackupManifest {
         !isObject(attachment) ||
         typeof attachment.id !== "string" ||
         !isIsoDate(attachment.date) ||
-        (attachment.episodeIndex !== null &&
+        (attachment.episodeIndex != null &&
           (!Number.isInteger(attachment.episodeIndex) || attachment.episodeIndex < 0)) ||
         typeof attachment.note !== "string" ||
         attachment.note.length > 500
@@ -241,7 +241,13 @@ function validateManifest(value: unknown): BackupManifest {
     }
   }
   if (issues.length) throw new BackupValidationError(issues);
-  return manifest;
+  return {
+    ...manifest,
+    attachments: manifest.attachments.map((attachment) => ({
+      ...attachment,
+      episodeIndex: attachment.episodeIndex ?? null,
+    })),
+  };
 }
 
 function validateDiary(value: unknown): PortableDiary {
