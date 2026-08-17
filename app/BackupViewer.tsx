@@ -185,7 +185,7 @@ function LocalBackupImage({
 export default function BackupViewer() {
   const inputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLElement>(null);
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [theme, setTheme] = useState<"dark" | "light">("light");
   const [bundle, setBundle] = useState<BackupBundle | null>(null);
   const [diary, setDiary] = useState<PortableDiary | null>(null);
   const [manifest, setManifest] = useState<BackupManifest | null>(null);
@@ -549,7 +549,7 @@ export default function BackupViewer() {
   return (
     <main className="app-shell" data-theme={theme}>
       <header className="topbar">
-        <a className="brand" href="#top" aria-label="Headmon Backup Studio home">
+        <a className="brand" href="https://headmondiary.com/" aria-label="Go to the Headmon website">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img className="brand-logo" src={`${import.meta.env.BASE_URL}headmon-icon.png`} alt="" />
           <span><strong>Headmon</strong><small>Backup Studio</small></span>
