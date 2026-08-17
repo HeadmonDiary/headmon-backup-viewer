@@ -515,7 +515,7 @@ export default function BackupViewer() {
       <header className="topbar">
         <a className="brand" href="#top" aria-label="Headmon Backup Studio home">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img className="brand-logo" src="/headmon-icon.png" alt="" />
+          <img className="brand-logo" src={`${import.meta.env.BASE_URL}headmon-icon.png`} alt="" />
           <span><strong>Headmon</strong><small>Backup Studio</small></span>
         </a>
         <div className="topbar-actions">
