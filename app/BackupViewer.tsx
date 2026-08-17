@@ -185,7 +185,6 @@ function LocalBackupImage({
 export default function BackupViewer() {
   const inputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLElement>(null);
-  const [theme, setTheme] = useState<"dark" | "light">("light");
   const [bundle, setBundle] = useState<BackupBundle | null>(null);
   const [diary, setDiary] = useState<PortableDiary | null>(null);
   const [manifest, setManifest] = useState<BackupManifest | null>(null);
@@ -547,7 +546,7 @@ export default function BackupViewer() {
   }
 
   return (
-    <main className="app-shell" data-theme={theme}>
+    <main className="app-shell">
       <header className="topbar">
         <a className="brand" href="https://headmondiary.com/" aria-label="Go to the Headmon website">
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -555,10 +554,6 @@ export default function BackupViewer() {
           <span><strong>Headmon</strong><small>Backup Studio</small></span>
         </a>
         <div className="topbar-actions">
-          <button className="theme-button" type="button" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}>
-            <span aria-hidden="true">{theme === "dark" ? "☀" : "◐"}</span>
-            {theme === "dark" ? "Light" : "Dark"}
-          </button>
           <div className="privacy-pill"><span className="privacy-dot" aria-hidden="true" />Processed locally</div>
         </div>
       </header>

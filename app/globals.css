@@ -1,16 +1,16 @@
 @import "tailwindcss";
 
 :root {
-  color-scheme: light dark;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
-html { background: #f3f8f7; scroll-behavior: smooth; }
+html { background: #08110f; scroll-behavior: smooth; }
 body {
   min-width: 320px;
   margin: 0;
-  background: #f3f8f7;
-  color: #152522;
+  background: #08110f;
+  color: #effbf8;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
 }
 button, input, textarea, select { font: inherit; }
@@ -69,36 +69,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
     var(--canvas);
 }
 
-.app-shell[data-theme="light"] {
-  color-scheme: light;
-  --canvas: #f3f8f7;
-  --paper: #ffffff;
-  --surface: rgba(255, 255, 255, 0.82);
-  --surface-muted: #edf5f2;
-  --input-bg: #ffffff;
-  --ink: #152522;
-  --muted: #526662;
-  --line: rgba(25, 91, 79, 0.16);
-  --green: #147d70;
-  --green-dark: #0c5d53;
-  --green-soft: rgba(20, 125, 112, 0.11);
-  --button-primary: #147d70;
-  --button-primary-hover: #0c5d53;
-  --pink: #b64e77;
-  --pink-soft: rgba(182, 78, 119, 0.11);
-  --blue: #416cb8;
-  --blue-soft: rgba(65, 108, 184, 0.1);
-  --amber: #9c641e;
-  --amber-soft: #f7ead7;
-  --rose: #a54b4b;
-  --rose-soft: #f6e4e1;
-  --danger-text: #7e3131;
-  --topbar: rgba(243, 248, 247, 0.93);
-  --status-clear: #288c78;
-  --status-pain: #ca765f;
-  --status-neutral: #81928d;
-  --shadow: 0 18px 50px rgba(18, 76, 66, 0.12);
-}
 .topbar {
   position: relative;
   z-index: 20;
@@ -128,21 +98,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .brand strong { font-size: 1.1rem; font-weight: 760; line-height: 1; transition: color 150ms ease; }
 .brand small { margin-top: 4px; color: var(--muted); font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; }
 .topbar-actions { display: flex; align-items: center; gap: 9px; }
-.theme-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 2.9rem;
-  padding: 0.55rem 1rem;
-  color: var(--muted);
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  cursor: pointer;
-  box-shadow: 0 10px 28px rgba(18, 76, 66, 0.08);
-  font-size: 13px;
-  font-weight: 650;
-}
 .privacy-pill {
   display: inline-flex;
   align-items: center;
@@ -469,8 +424,4 @@ button:disabled { cursor: not-allowed; opacity: 0.45; box-shadow: none; }
 
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; transition: none !important; }
-}
-
-@media (prefers-color-scheme: dark) {
-  html, body { background: #08110f; color: #effbf8; }
 }
