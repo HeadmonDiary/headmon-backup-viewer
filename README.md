@@ -21,8 +21,10 @@ exports.
 5. Add, edit, and remove episode and medication records.
 6. Pick triggers from the backed-up catalogue while keeping free-form trigger entry.
 7. Correct photo captions without changing the original image bytes.
-8. Switch between Headmon's dark and light visual themes.
-9. Export a validated, corrected, uncompressed ZIP that preserves the
+8. Keep edits across day navigation in the current browser session and mark
+   every changed date in the entry list.
+9. Switch between Headmon's dark and light visual themes.
+10. Export a validated, corrected, uncompressed ZIP that preserves the
    remaining files.
 
 ## Local development

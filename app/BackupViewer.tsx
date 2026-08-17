@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  type CSSProperties,
   type ChangeEvent,
   type DragEvent,
   useEffect,
@@ -183,6 +184,7 @@ function LocalBackupImage({
 
 export default function BackupViewer() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const editorRef = useRef<HTMLElement>(null);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [bundle, setBundle] = useState<BackupBundle | null>(null);
   const [diary, setDiary] = useState<PortableDiary | null>(null);
@@ -193,7 +195,26 @@ export default function BackupViewer() {
   const [loading, setLoading] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [modifiedDates, setModifiedDates] = useState<Set<string>>(() => new Set());
+  const [editorHeight, setEditorHeight] = useState<number | null>(null);
   const [error, setError] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    if (!dirty) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [dirty]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!bundle || !editor) return;
+    const updateHeight = () => setEditorHeight(Math.ceil(editor.getBoundingClientRect().height));
+    updateHeight();
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(editor);
+    return () => observer.disconnect();
+  }, [bundle]);
 
   const sortedDays = useMemo(
     () => [...(diary?.days ?? [])].sort((a, b) => b.date.localeCompare(a.date)),
@@ -267,6 +288,13 @@ export default function BackupViewer() {
       episodes: days.reduce((sum, day) => sum + day.episodes.length, 0),
       photos: manifest?.attachments.length ?? 0,
       weather: weather.length,
+      filledNotes:
+        days.filter((day) => day.note.trim()).length +
+        days.reduce(
+          (sum, day) => sum + day.episodes.filter((episode) => episode.note.trim()).length,
+          0,
+        ) +
+        (manifest?.attachments.filter((attachment) => attachment.note.trim()).length ?? 0),
     };
   }, [diary, manifest, weather]);
 
@@ -285,12 +313,14 @@ export default function BackupViewer() {
       setSelectedDate(newestDate);
       setSearch("");
       setDirty(false);
+      setModifiedDates(new Set());
     } catch (caught) {
       setBundle(null);
       setDiary(null);
       setManifest(null);
       setWeather([]);
       setSelectedDate(null);
+      setModifiedDates(new Set());
       setError(
         caught instanceof BackupValidationError
           ? caught.issues
@@ -326,6 +356,7 @@ export default function BackupViewer() {
       }),
     });
     setDirty(true);
+    setModifiedDates((current) => new Set(current).add(selectedDate));
   }
 
   function updateEpisode(
@@ -470,6 +501,9 @@ export default function BackupViewer() {
         : current,
     );
     setDirty(true);
+    if (selectedDate) {
+      setModifiedDates((current) => new Set(current).add(selectedDate));
+    }
   }
 
   function discardChanges() {
@@ -478,6 +512,7 @@ export default function BackupViewer() {
     setManifest(structuredClone(bundle.manifest));
     setWeather(structuredClone(bundle.weather));
     setDirty(false);
+    setModifiedDates(new Set());
   }
 
   function downloadCorrectedBackup() {
@@ -507,6 +542,7 @@ export default function BackupViewer() {
     setWeather([]);
     setSelectedDate(null);
     setDirty(false);
+    setModifiedDates(new Set());
     setError(null);
   }
 
@@ -545,7 +581,7 @@ export default function BackupViewer() {
           >
             <div className="zip-icon" aria-hidden="true"><span>ZIP</span></div>
             <h2>{loading ? "Checking your backup…" : "Open a Headmon backup"}</h2>
-            <p>Drop <code>headmon_full_backup.zip</code> here or choose it from your device.</p>
+            <p>Drop any dated Headmon full-backup ZIP here or choose it from your device.</p>
             <button className="primary-button" type="button" onClick={() => inputRef.current?.click()} disabled={loading}>{loading ? "Opening…" : "Choose backup ZIP"}</button>
             <input ref={inputRef} type="file" accept=".zip,application/zip" onChange={handleFileInput} hidden />
             <small>Current prototype limit: 512 MB</small>
@@ -577,6 +613,7 @@ export default function BackupViewer() {
               <div><strong>{stats.episodes}</strong><span>Episodes</span></div>
               <div><strong>{stats.photos}</strong><span>Photos</span></div>
               <div><strong>{stats.weather}</strong><span>Weather days</span></div>
+              <div><strong>{stats.filledNotes}</strong><span title="Day notes, episode notes, and photo captions">Filled notes</span></div>
             </div>
 
             <div className="archive-note"><span className="privacy-dot" aria-hidden="true" /><p><strong>Still local.</strong> This archive exists only in your browser&apos;s working memory.</p></div>
@@ -590,7 +627,10 @@ export default function BackupViewer() {
               <label className="search-field"><span className="sr-only">Search entries</span><input value={search} onChange={(event) => setSearch(event.target.value)} type="search" placeholder="Search notes, places, triggers…" /></label>
             </div>
 
-            <div className="entries-and-editor">
+            <div
+              className="entries-and-editor"
+              style={editorHeight ? { "--entry-editor-height": `${editorHeight}px` } as CSSProperties : undefined}
+            >
               <nav className="entry-list" aria-label="Diary entries">
                 <div className="entry-list-count">{filteredDays.length} entries</div>
                 {filteredDays.map((day) => {
@@ -598,7 +638,7 @@ export default function BackupViewer() {
                   return (
                     <button className={`entry-row${day.date === selectedDate ? " is-selected" : ""}`} key={day.date} type="button" onClick={() => setSelectedDate(day.date)}>
                       <span className={`status-mark ${status.tone}`} aria-hidden="true" />
-                      <span className="entry-row-copy"><strong>{formatDate(day.date)}</strong><span>{status.label}{day.locationName ? ` · ${day.locationName}` : day.note ? ` · ${day.note}` : ""}</span></span>
+                      <span className="entry-row-copy"><span className="entry-row-title"><strong>{formatDate(day.date)}</strong>{modifiedDates.has(day.date) && <span className="edited-pill">Edited</span>}</span><span>{status.label}{day.locationName ? ` · ${day.locationName}` : day.note ? ` · ${day.note}` : ""}</span></span>
                       <span className="episode-count">{day.episodes.length || "—"}</span>
                     </button>
                   );
@@ -606,7 +646,7 @@ export default function BackupViewer() {
                 {filteredDays.length === 0 && <p className="empty-list">No entries match that search.</p>}
               </nav>
 
-              <article className="entry-editor">
+              <article className="entry-editor" ref={editorRef}>
                 {selectedDay ? (
                   <>
                     <div className="editor-heading">
@@ -614,7 +654,7 @@ export default function BackupViewer() {
                         <div className="date-and-status"><h2>{formatDate(selectedDay.date)}</h2><span className={`status-badge ${statusFor(selectedDay).tone}`}>{statusFor(selectedDay).label}</span></div>
                         <p>{selectedDay.locationName || "No location"}{selectedDay.stressLevel != null ? ` · Stress ${selectedDay.stressLevel}/10` : ""}</p>
                       </div>
-                      {dirty && <span className="changed-badge">Modified</span>}
+                      {modifiedDates.has(selectedDay.date) && <span className="changed-badge">Modified</span>}
                     </div>
 
                     <section className="editor-section">
@@ -636,7 +676,7 @@ export default function BackupViewer() {
                     <section className="editor-section">
                       <label className="field-label" htmlFor="day-note">Day note</label>
                       <textarea id="day-note" value={selectedDay.note} maxLength={10_000} placeholder="No note for this day" onChange={(event) => updateDay((day) => ({ ...day, note: event.target.value }))} />
-                      <div className="field-meta"><span>Saved only when you export a new ZIP</span><span>{selectedDay.note.length.toLocaleString()} characters</span></div>
+                      <div className="field-meta"><span>Kept while this ZIP remains open</span><span>{selectedDay.note.length.toLocaleString()} characters</span></div>
                     </section>
 
                     <section className="editor-section weather-section">
@@ -795,7 +835,7 @@ export default function BackupViewer() {
           </section>
 
           <footer className="save-bar">
-            <div><strong>{dirty ? "You have unsaved corrections" : "No changes yet"}</strong>{error ? <span className="save-error">{error[0]}</span> : <span>The original ZIP will never be overwritten.</span>}</div>
+            <div><strong>{dirty ? `${modifiedDates.size} edited ${modifiedDates.size === 1 ? "day" : "days"} in this session` : "No changes yet"}</strong>{error ? <span className="save-error">{error[0]}</span> : <span>{dirty ? "Switch days freely. Export before refreshing or closing." : "Changes stay in memory until you export a corrected ZIP."}</span>}</div>
             <div className="save-actions"><button className="secondary-button" type="button" onClick={discardChanges} disabled={!dirty}>Discard changes</button><button className="primary-button" type="button" onClick={downloadCorrectedBackup} disabled={!dirty}>Export corrected ZIP</button></div>
           </footer>
         </div>

@@ -38,6 +38,7 @@ test("server-renders the private backup viewer", async () => {
   assert.match(html, /See what your diary remembers\./);
   assert.match(html, /correct days, episodes, medication, triggers, weather, and photo captions/i);
   assert.match(html, /Your archive never leaves this device\./);
+  assert.match(html, /Drop any dated Headmon full-backup ZIP here/i);
   assert.match(html, /Choose backup ZIP/);
 });
 
