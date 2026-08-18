@@ -34,7 +34,9 @@ test("server-renders the private backup viewer", async () => {
 
   const html = await response.text();
   assert.doesNotMatch(html, developmentPreviewMeta);
-  assert.match(html, /<title>Headmon Backup Studio<\/title>/i);
+  assert.match(html, /<title>Backup viewer \| Headmon<\/title>/i);
+  assert.match(html, /aria-label="Primary navigation"/i);
+  assert.match(html, /© 2026 Headmon/);
   assert.match(html, /See what your diary remembers\./);
   assert.match(html, /correct days, episodes, medication, triggers, weather, and photo captions/i);
   assert.match(html, /Your archive never leaves this device\./);

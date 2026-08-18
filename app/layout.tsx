@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Headmon Backup Studio",
+  title: "Backup viewer | Headmon",
   description: "A local-only viewer and editor for Headmon full backups.",
   icons: {
     icon: "/headmon-icon.png",

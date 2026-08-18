@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import BackupViewer from "./BackupViewer";
 
 export const metadata: Metadata = {
-  title: "Headmon Backup Studio",
+  title: "Backup viewer | Headmon",
   description:
     "Privately browse and correct a Headmon full backup on your device.",
 };

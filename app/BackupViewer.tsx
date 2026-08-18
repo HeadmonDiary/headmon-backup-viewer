@@ -546,22 +546,28 @@ export default function BackupViewer() {
   }
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="https://headmondiary.com/" aria-label="Go to the Headmon website">
+    <div className="app-shell">
+      <header className="site-header">
+        <a className="site-brand" href="https://headmondiary.com/" aria-label="Headmon home">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img className="brand-logo" src={`${import.meta.env.BASE_URL}headmon-icon.png`} alt="" />
-          <span><strong>Headmon</strong><small>Backup Studio</small></span>
+          <img src={`${import.meta.env.BASE_URL}headmon-icon.png`} alt="" />
+          <span>Headmon</span>
         </a>
-        <div className="topbar-actions">
-          <div className="privacy-pill"><span className="privacy-dot" aria-hidden="true" />Processed locally</div>
-        </div>
+        <nav className="site-nav" aria-label="Primary navigation">
+          <a href="/in-action/">In action</a>
+          <a href="/about/">About</a>
+          <a href="/privacy/">Privacy</a>
+          <a href="/backup/">Backups</a>
+          <a href="/support/">Support</a>
+          <a href="https://github.com/HeadmonDiary/headmon">GitHub</a>
+        </nav>
       </header>
 
-      {!bundle ? (
-        <section className="welcome" id="top">
+      <main className="site-main" id="top">
+        {!bundle ? (
+          <section className="welcome">
           <div className="welcome-copy">
-            <p className="eyebrow">PRIVATE BACKUP TOOL</p>
+            <p className="eyebrow">Private backup tool</p>
             <h1>See what your diary remembers.</h1>
             <p className="welcome-intro">Open a complete Headmon backup to browse your history and correct days, episodes, medication, triggers, weather, and photo captions. Your archive never leaves this device.</p>
             <div className="trust-row" aria-label="Privacy guarantees"><span>No account</span><span>No upload</span><span>Original stays untouched</span></div>
@@ -588,9 +594,9 @@ export default function BackupViewer() {
               {error.map((issue) => <p key={issue}>{issue}</p>)}
             </div>
           )}
-        </section>
-      ) : (
-        <div className="viewer-layout" id="top">
+          </section>
+        ) : (
+          <div className="viewer-layout">
           <aside className="archive-sidebar">
             <div className="archive-file">
               <div className="mini-zip" aria-hidden="true">ZIP</div>
@@ -833,8 +839,14 @@ export default function BackupViewer() {
             <div><strong>{dirty ? `${modifiedDates.size} edited ${modifiedDates.size === 1 ? "day" : "days"} in this session` : "No changes yet"}</strong>{error ? <span className="save-error">{error[0]}</span> : <span>{dirty ? "Switch days freely. Export before refreshing or closing." : "Changes stay in memory until you export a corrected ZIP."}</span>}</div>
             <div className="save-actions"><button className="secondary-button" type="button" onClick={discardChanges} disabled={!dirty}>Discard changes</button><button className="primary-button" type="button" onClick={downloadCorrectedBackup} disabled={!dirty}>Export corrected ZIP</button></div>
           </footer>
-        </div>
-      )}
-    </main>
+          </div>
+        )}
+      </main>
+
+      <footer className="site-footer">
+        <span>© 2026 Headmon</span>
+        <a href="/privacy/">Privacy</a>
+      </footer>
+    </div>
   );
 }
