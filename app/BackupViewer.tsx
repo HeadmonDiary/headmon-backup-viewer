@@ -37,6 +37,16 @@ import {
   compareDiaries,
 } from "@/lib/workbench";
 
+type SaveFilePickerWindow = typeof window & {
+  showSaveFilePicker?: (options: {
+    suggestedName?: string;
+    types?: Array<{
+      description?: string;
+      accept: Record<string, string[]>;
+    }>;
+  }) => Promise<FileSystemFileHandle>;
+};
+
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   weekday: "short",
   day: "numeric",
@@ -1084,22 +1094,42 @@ export default function BackupViewer() {
     }
   }
 
-  function downloadCorrectedBackup() {
+  function downloadBlob(blob: Blob, fileName: string) {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  }
+
+  async function downloadCorrectedBackup() {
     if (!bundle || !diary || !manifest) return;
     try {
       const blob = exportBackup(bundle, diary, manifest, weather);
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = correctedFileName(bundle.fileName);
-      anchor.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+      const fileName = correctedFileName(bundle.fileName);
+      const saveFilePicker = (window as SaveFilePickerWindow).showSaveFilePicker;
+      if (saveFilePicker) {
+        const handle = await saveFilePicker.call(window, {
+          suggestedName: fileName,
+          types: [{
+            description: "Headmon corrected backup",
+            accept: { "application/zip": [".zip"] },
+          }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } else {
+        downloadBlob(blob, fileName);
+      }
       setError(null);
     } catch (caught) {
+      if (caught instanceof DOMException && caught.name === "AbortError") return;
       setError(
         caught instanceof BackupValidationError
           ? caught.issues
-          : ["The corrected backup could not be created."],
+          : ["The corrected backup could not be saved."],
       );
     }
   }
@@ -1518,7 +1548,7 @@ export default function BackupViewer() {
 
           <footer className="save-bar">
             <div><strong>{dirty ? modifiedDates.size > 0 ? `${modifiedDates.size} edited ${modifiedDates.size === 1 ? "day" : "days"}` : "Backup definitions edited" : "No changes yet"}</strong>{error ? <span className="save-error">{error[0]}</span> : <span>{dirty ? draftStatus === "saved" ? "Draft saved locally. Export when the corrected backup is ready." : "Saving a device-local draft…" : "Open entries, compare archives, or create a report."}</span>}</div>
-            <div className="save-actions"><button className="secondary-button" type="button" onClick={undoChange} disabled={historyCounts.undo === 0}>Undo</button><button className="secondary-button" type="button" onClick={redoChange} disabled={historyCounts.redo === 0}>Redo</button><button className="secondary-button" type="button" onClick={() => setShowChangeReview((current) => !current)} disabled={!dirty}>Review</button><button className="secondary-button" type="button" onClick={() => void discardChanges()} disabled={!dirty}>Discard</button><button className="primary-button" type="button" onClick={downloadCorrectedBackup} disabled={!dirty}>Export corrected ZIP</button></div>
+            <div className="save-actions"><button className="secondary-button" type="button" onClick={undoChange} disabled={historyCounts.undo === 0}>Undo</button><button className="secondary-button" type="button" onClick={redoChange} disabled={historyCounts.redo === 0}>Redo</button><button className="secondary-button" type="button" onClick={() => setShowChangeReview((current) => !current)} disabled={!dirty}>Review</button><button className="secondary-button" type="button" onClick={() => void discardChanges()} disabled={!dirty}>Discard</button><button className="primary-button" type="button" onClick={() => void downloadCorrectedBackup()} disabled={!dirty}>Export corrected ZIP</button></div>
           </footer>
           </div>
         )}
