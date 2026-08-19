@@ -4,7 +4,7 @@ import BackupViewer from "./BackupViewer";
 export const metadata: Metadata = {
   title: "Backup viewer | Headmon",
   description:
-    "Privately browse and correct a Headmon full backup on your device.",
+    "Privately browse, repair, compare, and report on Headmon backups on your device.",
 };
 
 export default function Home() {

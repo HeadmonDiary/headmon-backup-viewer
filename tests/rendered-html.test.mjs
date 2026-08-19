@@ -38,10 +38,10 @@ test("server-renders the private backup viewer", async () => {
   assert.match(html, /aria-label="Primary navigation"/i);
   assert.match(html, /© 2026 Headmon/);
   assert.match(html, /See what your diary remembers\./);
-  assert.match(html, /correct days, episodes, medication, triggers, weather, and photo captions/i);
+  assert.match(html, /browse, repair, compare, and report on your diary/i);
   assert.match(html, /Your archive never leaves this device\./);
-  assert.match(html, /Drop any dated Headmon full-backup ZIP here/i);
-  assert.match(html, /Choose backup ZIP/);
+  assert.match(html, /complete ZIP or calendar JSON backup/i);
+  assert.match(html, /Choose backup/);
 });
 
 test("removes the temporary starter preview", async () => {

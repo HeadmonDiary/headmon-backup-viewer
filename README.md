@@ -11,21 +11,20 @@ exports.
 - The included example and any personal backup files stay outside Git.
 - The viewer has no backend, account, analytics, or durable data store.
 
-## Current MVP
+## Current workbench
 
-1. Open and validate a Headmon full-backup v1 ZIP.
+1. Open and validate a Headmon complete-backup v1 ZIP or portable calendar JSON.
 2. Verify the expected files and attachment SHA-256 checksums.
-3. Browse and search diary entries with distinct migraine, headache, aura-only,
-   skipped, and headache-free states.
-4. Correct day status, stress, notes, recorded weather/place, and day triggers.
-5. Add, edit, and remove episode and medication records.
-6. Pick triggers from the backed-up catalogue while keeping free-form trigger entry.
-7. Correct photo captions without changing the original image bytes.
-8. Keep edits across day navigation in the current browser session and mark
-   every changed date in the entry list.
-9. Switch between Headmon's dark and light visual themes.
-10. Export a validated, corrected, uncompressed ZIP that preserves the
-   remaining files.
+3. Resume device-local drafts stored in IndexedDB without an account or server.
+4. Browse, search, filter, and inspect entries in list and calendar views.
+5. Add, remove, move, and correct days, episodes, medication, weather, notes,
+   triggers, and status.
+6. Edit trigger and medicine catalogues while retaining free-form choices.
+7. Browse, caption, download, reassign, and remove backed-up photos.
+8. Undo and redo edits, review changed dates, and discard the working copy.
+9. Create formula-safe CSV, printable HTML/PDF, and portable calendar JSON.
+10. Compare two backups, add missing dates, and explicitly resolve conflicts.
+11. Export a validated corrected ZIP while preserving referenced attachment bytes.
 
 ## Local development
 

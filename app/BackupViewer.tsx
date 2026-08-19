@@ -21,6 +21,21 @@ import {
   exportBackup,
   openBackup,
 } from "@/lib/backup";
+import {
+  type BackupDraft,
+  type BackupDraftSummary,
+  deleteDraft,
+  draftIdForFile,
+  listDrafts,
+  loadDraft,
+  saveDraft,
+} from "@/lib/drafts";
+import {
+  backupCsv,
+  backupReportHtml,
+  bundleLabel,
+  compareDiaries,
+} from "@/lib/workbench";
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   weekday: "short",
@@ -65,6 +80,61 @@ function statusFor(day: BackupDay): { label: string; tone: string } {
 
 function cloneDiary(diary: PortableDiary): PortableDiary {
   return structuredClone(diary);
+}
+
+type WorkspaceView = "entries" | "calendar" | "photos" | "catalogues" | "reports" | "compare";
+type StatusFilter = "all" | "migraine" | "headache" | "aura" | "pain-free" | "skipped";
+
+interface WorkspaceSnapshot {
+  label: string;
+  diary: PortableDiary;
+  manifest: BackupManifest;
+  weather: WeatherRecord[];
+}
+
+function workspaceIsDirty(
+  bundle: BackupBundle | null,
+  diary: PortableDiary | null,
+  manifest: BackupManifest | null,
+  weather: WeatherRecord[],
+): boolean {
+  if (!bundle || !diary || !manifest) return false;
+  return (
+    JSON.stringify(bundle.diary) !== JSON.stringify(diary) ||
+    JSON.stringify(bundle.manifest) !== JSON.stringify(manifest) ||
+    JSON.stringify(bundle.weather) !== JSON.stringify(weather)
+  );
+}
+
+function changedDatesFor(
+  bundle: BackupBundle | null,
+  diary: PortableDiary | null,
+  manifest: BackupManifest | null,
+  weather: WeatherRecord[],
+): Set<string> {
+  if (!bundle || !diary || !manifest) return new Set();
+  const dates = new Set<string>();
+  const originalDays = new Map(bundle.diary.days.map((day) => [day.date, day]));
+  const workingDays = new Map(diary.days.map((day) => [day.date, day]));
+  for (const date of new Set([...originalDays.keys(), ...workingDays.keys()])) {
+    if (JSON.stringify(originalDays.get(date)) !== JSON.stringify(workingDays.get(date))) dates.add(date);
+  }
+  const originalAttachments = new Map(bundle.manifest.attachments.map((item) => [item.id, item]));
+  const workingAttachments = new Map(manifest.attachments.map((item) => [item.id, item]));
+  for (const id of new Set([...originalAttachments.keys(), ...workingAttachments.keys()])) {
+    const original = originalAttachments.get(id);
+    const working = workingAttachments.get(id);
+    if (JSON.stringify(original) !== JSON.stringify(working)) {
+      if (original?.date) dates.add(original.date);
+      if (working?.date) dates.add(working.date);
+    }
+  }
+  const originalWeather = new Map(bundle.weather.map((item) => [item.date, item]));
+  const workingWeather = new Map(weather.map((item) => [item.date, item]));
+  for (const date of new Set([...originalWeather.keys(), ...workingWeather.keys()])) {
+    if (JSON.stringify(originalWeather.get(date)) !== JSON.stringify(workingWeather.get(date))) dates.add(date);
+  }
+  return dates;
 }
 
 function uniqueLabels(value: string): string[] {
@@ -184,19 +254,40 @@ function LocalBackupImage({
 
 export default function BackupViewer() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const compareInputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLElement>(null);
+  const historyRef = useRef<WorkspaceSnapshot[]>([]);
+  const redoRef = useRef<WorkspaceSnapshot[]>([]);
+  const lastHistoryRef = useRef<{ key: string } | null>(null);
   const [bundle, setBundle] = useState<BackupBundle | null>(null);
   const [diary, setDiary] = useState<PortableDiary | null>(null);
   const [manifest, setManifest] = useState<BackupManifest | null>(null);
   const [weather, setWeather] = useState<WeatherRecord[]>([]);
+  const [archiveId, setArchiveId] = useState<string | null>(null);
+  const [sourceBlob, setSourceBlob] = useState<Blob | null>(null);
+  const [drafts, setDrafts] = useState<BackupDraftSummary[]>([]);
+  const [draftStatus, setDraftStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("entries");
+  const [newDayDate, setNewDayDate] = useState("");
+  const [showChangeReview, setShowChangeReview] = useState(false);
+  const [comparison, setComparison] = useState<BackupBundle | null>(null);
+  const [comparisonChoices, setComparisonChoices] = useState<Record<string, "current" | "incoming">>({});
   const [loading, setLoading] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [modifiedDates, setModifiedDates] = useState<Set<string>>(() => new Set());
   const [editorHeight, setEditorHeight] = useState<number | null>(null);
+  const [historyCounts, setHistoryCounts] = useState({ undo: 0, redo: 0 });
   const [error, setError] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    void listDrafts().then(setDrafts).catch(() => setDraftStatus("error"));
+  }, []);
 
   useEffect(() => {
     if (!dirty) return;
@@ -215,6 +306,30 @@ export default function BackupViewer() {
     return () => observer.disconnect();
   }, [bundle]);
 
+  useEffect(() => {
+    if (!dirty || !archiveId || !sourceBlob || !bundle || !diary || !manifest) return;
+    const timer = window.setTimeout(() => {
+      setDraftStatus("saving");
+      const draft: BackupDraft = {
+        id: archiveId,
+        fileName: bundle.fileName,
+        sourceBlob,
+        savedAtEpochMillis: Date.now(),
+        diary: structuredClone(diary),
+        manifest: structuredClone(manifest),
+        weather: structuredClone(weather),
+        modifiedDates: [...modifiedDates],
+      };
+      void saveDraft(draft)
+        .then(async () => {
+          setDraftStatus("saved");
+          setDrafts(await listDrafts());
+        })
+        .catch(() => setDraftStatus("error"));
+    }, 1_200);
+    return () => window.clearTimeout(timer);
+  }, [archiveId, bundle, diary, dirty, manifest, modifiedDates, sourceBlob, weather]);
+
   const sortedDays = useMemo(
     () => [...(diary?.days ?? [])].sort((a, b) => b.date.localeCompare(a.date)),
     [diary],
@@ -222,21 +337,29 @@ export default function BackupViewer() {
 
   const filteredDays = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
-    if (!query) return sortedDays;
-    return sortedDays.filter((day) =>
-      [
-        day.date,
-        day.note,
-        day.locationName,
-        ...day.triggers,
-        ...day.episodes.flatMap((episode) => [episode.note, ...episode.triggers]),
-        ...day.medications.map((medication) => medication.name),
-      ]
-        .join(" ")
-        .toLocaleLowerCase()
-        .includes(query),
-    );
-  }, [search, sortedDays]);
+    return sortedDays.filter((day) => {
+      if (fromDate && day.date < fromDate) return false;
+      if (toDate && day.date > toDate) return false;
+      const tone = statusFor(day).tone;
+      if (statusFilter === "migraine" && tone !== "migraine") return false;
+      if (statusFilter === "headache" && tone !== "pain") return false;
+      if (statusFilter === "aura" && tone !== "aura") return false;
+      if (statusFilter === "pain-free" && tone !== "clear") return false;
+      if (statusFilter === "skipped" && tone !== "neutral") return false;
+      if (!query) return true;
+      return [
+          day.date,
+          day.note,
+          day.locationName,
+          ...day.triggers,
+          ...day.episodes.flatMap((episode) => [episode.note, ...episode.triggers]),
+          ...day.medications.map((medication) => medication.name),
+        ]
+          .join(" ")
+          .toLocaleLowerCase()
+          .includes(query);
+    });
+  }, [fromDate, search, sortedDays, statusFilter, toDate]);
 
   const selectedDay = diary?.days.find((day) => day.date === selectedDate) ?? null;
   const selectedAttachments = useMemo(
@@ -297,28 +420,149 @@ export default function BackupViewer() {
     };
   }, [diary, manifest, weather]);
 
-  async function loadFile(file: File | undefined) {
+  const comparisonResult = useMemo(
+    () => diary && comparison ? compareDiaries(diary, comparison.diary) : null,
+    [comparison, diary],
+  );
+
+  const calendarMonths = useMemo(() => {
+    const groups = new Map<string, BackupDay[]>();
+    for (const day of filteredDays) {
+      const month = day.date.slice(0, 7);
+      groups.set(month, [...(groups.get(month) ?? []), day]);
+    }
+    return [...groups.entries()].sort(([left], [right]) => right.localeCompare(left));
+  }, [filteredDays]);
+
+  const changeDetails = useMemo(() => {
+    if (!bundle || !diary || !manifest) return [] as Array<{ date: string; changes: string[] }>;
+    const originalDays = new Map(bundle.diary.days.map((day) => [day.date, day]));
+    const currentDays = new Map(diary.days.map((day) => [day.date, day]));
+    const rows: Array<{ date: string; changes: string[] }> = [];
+    for (const date of [...modifiedDates].sort((left, right) => right.localeCompare(left))) {
+      const before = originalDays.get(date);
+      const after = currentDays.get(date);
+      const changes: string[] = [];
+      if (!before && after) changes.push("Day added");
+      else if (before && !after) changes.push("Day removed");
+      else if (before && after) {
+        if (before.note !== after.note || before.stressLevel !== after.stressLevel || before.isSkipped !== after.isSkipped) changes.push("Day details");
+        if (JSON.stringify(before.triggers) !== JSON.stringify(after.triggers)) changes.push("Day triggers");
+        if (JSON.stringify(before.episodes) !== JSON.stringify(after.episodes)) changes.push("Episodes");
+        if (JSON.stringify(before.medications) !== JSON.stringify(after.medications)) changes.push("Medication");
+        const weatherKeys = ["temperatureCelsius", "airPressureHpa", "humidityPercent", "windSpeed", "weatherCondition", "uvIndex", "airQualityIndex", "pressureTrend", "locationName"] as const;
+        if (weatherKeys.some((key) => before[key] !== after[key])) changes.push("Weather or place");
+      }
+      const beforePhotos = bundle.manifest.attachments.filter((item) => item.date === date);
+      const afterPhotos = manifest.attachments.filter((item) => item.date === date);
+      if (JSON.stringify(beforePhotos) !== JSON.stringify(afterPhotos)) changes.push("Photos");
+      rows.push({ date, changes: changes.length ? changes : ["Backup metadata"] });
+    }
+    if (JSON.stringify(bundle.diary.triggerCatalog) !== JSON.stringify(diary.triggerCatalog) || JSON.stringify(bundle.diary.medicationCatalog) !== JSON.stringify(diary.medicationCatalog)) {
+      rows.unshift({ date: "Catalogue", changes: ["Trigger or medicine catalogue"] });
+    }
+    return rows;
+  }, [bundle, diary, manifest, modifiedDates]);
+
+  function captureHistory(label: string, key = label) {
+    if (!diary || !manifest) return;
+    setDraftStatus("saving");
+    if (lastHistoryRef.current?.key === key) return;
+    historyRef.current.push({
+      label,
+      diary: structuredClone(diary),
+      manifest: structuredClone(manifest),
+      weather: structuredClone(weather),
+    });
+    if (historyRef.current.length > 80) historyRef.current.shift();
+    redoRef.current = [];
+    lastHistoryRef.current = { key };
+    setHistoryCounts({ undo: historyRef.current.length, redo: 0 });
+  }
+
+  function restoreSnapshot(snapshot: WorkspaceSnapshot) {
+    const nextDiary = structuredClone(snapshot.diary);
+    const nextManifest = structuredClone(snapshot.manifest);
+    const nextWeather = structuredClone(snapshot.weather);
+    setDiary(nextDiary);
+    setManifest(nextManifest);
+    setWeather(nextWeather);
+    setDirty(workspaceIsDirty(bundle, nextDiary, nextManifest, nextWeather));
+    setModifiedDates(changedDatesFor(bundle, nextDiary, nextManifest, nextWeather));
+  }
+
+  function undoChange() {
+    if (!diary || !manifest) return;
+    const previous = historyRef.current.pop();
+    if (!previous) return;
+    redoRef.current.push({
+      label: previous.label,
+      diary: structuredClone(diary),
+      manifest: structuredClone(manifest),
+      weather: structuredClone(weather),
+    });
+    restoreSnapshot(previous);
+    lastHistoryRef.current = null;
+    setHistoryCounts({ undo: historyRef.current.length, redo: redoRef.current.length });
+  }
+
+  function redoChange() {
+    if (!diary || !manifest) return;
+    const next = redoRef.current.pop();
+    if (!next) return;
+    historyRef.current.push({
+      label: next.label,
+      diary: structuredClone(diary),
+      manifest: structuredClone(manifest),
+      weather: structuredClone(weather),
+    });
+    restoreSnapshot(next);
+    lastHistoryRef.current = null;
+    setHistoryCounts({ undo: historyRef.current.length, redo: redoRef.current.length });
+  }
+
+  async function loadFile(file: File | undefined, restoredDraft?: BackupDraft | null) {
     if (!file) return;
     setLoading(true);
     setError(null);
     try {
       const opened = await openBackup(file);
-      const nextDiary = cloneDiary(opened.diary);
+      const id = restoredDraft?.id ?? draftIdForFile(file);
+      const stored = restoredDraft ?? await loadDraft(id);
+      const nextDiary = cloneDiary(stored?.diary ?? opened.diary);
+      const nextManifest = structuredClone(stored?.manifest ?? opened.manifest);
+      const nextWeather = structuredClone(stored?.weather ?? opened.weather);
       const newestDate = [...nextDiary.days].sort((a, b) => b.date.localeCompare(a.date))[0]?.date ?? null;
       setBundle(opened);
       setDiary(nextDiary);
-      setManifest(structuredClone(opened.manifest));
-      setWeather(structuredClone(opened.weather));
+      setManifest(nextManifest);
+      setWeather(nextWeather);
+      setArchiveId(id);
+      setSourceBlob(stored?.sourceBlob ?? file);
       setSelectedDate(newestDate);
       setSearch("");
-      setDirty(false);
-      setModifiedDates(new Set());
+      setStatusFilter("all");
+      setFromDate("");
+      setToDate("");
+      setWorkspaceView("entries");
+      setComparison(null);
+      setComparisonChoices({});
+      const restoredDirty = Boolean(stored) || workspaceIsDirty(opened, nextDiary, nextManifest, nextWeather);
+      setDirty(restoredDirty);
+      setModifiedDates(stored?.modifiedDates ? new Set(stored.modifiedDates) : changedDatesFor(opened, nextDiary, nextManifest, nextWeather));
+      setDraftStatus(stored ? "saved" : "idle");
+      historyRef.current = [];
+      redoRef.current = [];
+      lastHistoryRef.current = null;
+      setHistoryCounts({ undo: 0, redo: 0 });
     } catch (caught) {
       setBundle(null);
       setDiary(null);
       setManifest(null);
       setWeather([]);
       setSelectedDate(null);
+      setArchiveId(null);
+      setSourceBlob(null);
       setModifiedDates(new Set());
       setError(
         caught instanceof BackupValidationError
@@ -328,6 +572,28 @@ export default function BackupViewer() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function resumeDraft(id: string) {
+    setLoading(true);
+    try {
+      const draft = await loadDraft(id);
+      if (!draft) throw new Error("Draft missing");
+      const file = new File([draft.sourceBlob], draft.fileName, {
+        type: draft.fileName.toLowerCase().endsWith(".json") ? "application/json" : "application/zip",
+        lastModified: draft.savedAtEpochMillis,
+      });
+      await loadFile(file, draft);
+    } catch {
+      setError(["That local draft could not be reopened. Its original backup may need to be selected again."]);
+      setLoading(false);
+    }
+  }
+
+  async function removeSavedDraft(id: string) {
+    await deleteDraft(id);
+    setDrafts(await listDrafts());
+    if (archiveId === id) setDraftStatus("idle");
   }
 
   function handleFileInput(event: ChangeEvent<HTMLInputElement>) {
@@ -341,8 +607,13 @@ export default function BackupViewer() {
     void loadFile(event.dataTransfer.files?.[0]);
   }
 
-  function updateDay(updater: (day: BackupDay) => BackupDay) {
+  function updateDay(
+    updater: (day: BackupDay) => BackupDay,
+    label = "Edit day",
+    historyKey = `day:${selectedDate ?? "none"}`,
+  ) {
     if (!diary || !selectedDate) return;
+    captureHistory(label, historyKey);
     setDiary({
       ...diary,
       days: diary.days.map((day) => {
@@ -395,7 +666,7 @@ export default function BackupViewer() {
           triggers: [],
         },
       ],
-    }));
+    }), "Add episode", `add-episode:${selectedDay.date}`);
   }
 
   function removeEpisode(episodeIndex: number) {
@@ -409,7 +680,7 @@ export default function BackupViewer() {
           ? { ...medication, episodeId: undefined }
           : medication,
       ),
-    }));
+    }), "Remove episode", `remove-episode:${selectedDay.date}:${episodeIndex}`);
     setManifest((current) =>
       current
         ? {
@@ -457,14 +728,14 @@ export default function BackupViewer() {
           takenAtEpochMillis: middayFor(day.date),
         },
       ],
-    }));
+    }), "Add medication", `add-medication:${selectedDay.date}`);
   }
 
   function removeMedication(medicationIndex: number) {
     updateDay((day) => ({
       ...day,
       medications: day.medications.filter((_, index) => index !== medicationIndex),
-    }));
+    }), "Remove medication", `remove-medication:${selectedDate}:${medicationIndex}`);
   }
 
   type EditableWeatherKey =
@@ -480,7 +751,7 @@ export default function BackupViewer() {
 
   function updateWeatherValue(key: EditableWeatherKey, value: string | number | undefined) {
     if (!selectedDate) return;
-    updateDay((day) => ({ ...day, [key]: value }));
+    updateDay((day) => ({ ...day, [key]: value }), "Edit weather", `weather:${selectedDate}:${key}`);
     setWeather((current) =>
       current.map((record) =>
         record.date === selectedDate ? { ...record, [key]: value } : record,
@@ -489,6 +760,7 @@ export default function BackupViewer() {
   }
 
   function updateAttachmentNote(attachmentId: string, note: string) {
+    captureHistory("Edit photo caption", `photo-caption:${attachmentId}`);
     setManifest((current) =>
       current
         ? {
@@ -505,13 +777,311 @@ export default function BackupViewer() {
     }
   }
 
-  function discardChanges() {
+  function addDay() {
+    if (!diary || !/^\d{4}-\d{2}-\d{2}$/.test(newDayDate)) return;
+    if (diary.days.some((day) => day.date === newDayDate)) {
+      setError(["That date already exists in this backup."]);
+      return;
+    }
+    captureHistory("Add day", `add-day:${newDayDate}`);
+    const now = middayFor(newDayDate);
+    const nextDay: BackupDay = {
+      date: newDayDate,
+      hadHeadache: false,
+      note: "",
+      isSkipped: false,
+      weatherCondition: "",
+      pressureTrend: "",
+      locationName: "",
+      triggers: [],
+      episodes: [],
+      medications: [],
+      createdAtEpochMillis: now,
+      updatedAtEpochMillis: now,
+    };
+    setDiary({ ...diary, days: [...diary.days, nextDay] });
+    setSelectedDate(newDayDate);
+    setModifiedDates((current) => new Set(current).add(newDayDate));
+    setDirty(true);
+    setNewDayDate("");
+    setWorkspaceView("entries");
+    setError(null);
+  }
+
+  function deleteSelectedDay() {
+    if (!diary || !selectedDay || !window.confirm(`Remove ${formatDate(selectedDay.date)} from this working backup? You can undo this.`)) return;
+    captureHistory("Remove day", `remove-day:${selectedDay.date}`);
+    const removedDate = selectedDay.date;
+    const remaining = diary.days.filter((day) => day.date !== removedDate);
+    setDiary({ ...diary, days: remaining });
+    setManifest((current) => current ? { ...current, attachments: current.attachments.filter((item) => item.date !== removedDate) } : current);
+    setWeather((current) => current.filter((item) => item.date !== removedDate));
+    setSelectedDate([...remaining].sort((left, right) => right.date.localeCompare(left.date))[0]?.date ?? null);
+    setModifiedDates((current) => new Set(current).add(removedDate));
+    setDirty(true);
+  }
+
+  function moveSelectedDay(nextDate: string) {
+    if (!diary || !selectedDay || nextDate === selectedDay.date) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(nextDate) || diary.days.some((day) => day.date === nextDate)) {
+      setError(["Choose a valid date that is not already in the backup."]);
+      return;
+    }
+    const oldDate = selectedDay.date;
+    const shift = middayFor(nextDate) - middayFor(oldDate);
+    captureHistory("Move day", `move-day:${oldDate}`);
+    setDiary({
+      ...diary,
+      days: diary.days.map((day) => day.date !== oldDate ? day : {
+        ...day,
+        date: nextDate,
+        episodes: day.episodes.map((episode) => ({
+          ...episode,
+          startTimeEpochMillis: episode.startTimeEpochMillis + shift,
+          endTimeEpochMillis: episode.endTimeEpochMillis === 0 ? 0 : episode.endTimeEpochMillis + shift,
+        })),
+        medications: day.medications.map((medication) => ({
+          ...medication,
+          takenAtEpochMillis: medication.takenAtEpochMillis == null ? undefined : medication.takenAtEpochMillis + shift,
+        })),
+      }),
+    });
+    setManifest((current) => current ? { ...current, attachments: current.attachments.map((item) => item.date === oldDate ? { ...item, date: nextDate } : item) } : current);
+    setWeather((current) => current.map((item) => item.date === oldDate ? { ...item, date: nextDate } : item));
+    setSelectedDate(nextDate);
+    setModifiedDates((current) => new Set(current).add(oldDate).add(nextDate));
+    setDirty(true);
+    setError(null);
+  }
+
+  function downloadAttachment(attachmentId: string) {
+    if (!bundle || !manifest) return;
+    const attachment = manifest.attachments.find((item) => item.id === attachmentId);
+    if (!attachment) return;
+    const bytes = bundle.entries[attachment.path];
+    if (!bytes) return;
+    const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    const url = URL.createObjectURL(new Blob([copy], { type: attachment.mimeType }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = attachment.path.split("/").at(-1) ?? "headmon-photo";
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  }
+
+  function removeAttachment(attachmentId: string) {
+    if (!manifest || !window.confirm("Remove this photo from the corrected backup? You can undo this.")) return;
+    const attachment = manifest.attachments.find((item) => item.id === attachmentId);
+    if (!attachment) return;
+    captureHistory("Remove photo", `remove-photo:${attachmentId}`);
+    setManifest({ ...manifest, attachments: manifest.attachments.filter((item) => item.id !== attachmentId) });
+    setModifiedDates((current) => new Set(current).add(attachment.date));
+    setDirty(true);
+  }
+
+  function moveAttachment(attachmentId: string, date: string, episodeIndex: number | null) {
+    if (!manifest || !diary) return;
+    const targetDay = diary.days.find((day) => day.date === date);
+    if (!targetDay || (episodeIndex !== null && !targetDay.episodes[episodeIndex])) return;
+    const attachment = manifest.attachments.find((item) => item.id === attachmentId);
+    if (!attachment) return;
+    captureHistory("Move photo", `move-photo:${attachmentId}`);
+    setManifest({
+      ...manifest,
+      attachments: manifest.attachments.map((item) => item.id === attachmentId ? { ...item, date, episodeIndex } : item),
+    });
+    setModifiedDates((current) => new Set(current).add(attachment.date).add(date));
+    setDirty(true);
+  }
+
+  function updateTriggerDefinition(index: number, updates: Partial<BackupTriggerDefinition>) {
+    if (!diary) return;
+    const definition = diary.triggerCatalog[index];
+    if (!definition) return;
+    const nextName = updates.name?.trim() || definition.name;
+    if (nextName !== definition.name && diary.triggerCatalog.some((item, itemIndex) => itemIndex !== index && item.name.toLocaleLowerCase() === nextName.toLocaleLowerCase())) return;
+    captureHistory("Edit trigger catalogue", `trigger-definition:${index}`);
+    setDiary({
+      ...diary,
+      triggerCatalog: diary.triggerCatalog.map((item, itemIndex) => itemIndex === index ? { ...item, ...updates, name: nextName } : item),
+      days: nextName === definition.name ? diary.days : diary.days.map((day) => ({
+        ...day,
+        triggers: day.triggers.map((name) => name === definition.name ? nextName : name),
+        episodes: day.episodes.map((episode) => ({ ...episode, triggers: episode.triggers.map((name) => name === definition.name ? nextName : name) })),
+      })),
+    });
+    setDirty(true);
+  }
+
+  function addTriggerDefinition() {
+    if (!diary) return;
+    const base = "Custom trigger";
+    let name = base;
+    let number = 2;
+    while (diary.triggerCatalog.some((item) => item.name === name)) name = `${base} ${number++}`;
+    captureHistory("Add trigger catalogue item", `add-trigger-definition:${name}`);
+    setDiary({ ...diary, triggerCatalog: [...diary.triggerCatalog, { name, emoji: "✨", isBuiltIn: false, isHidden: false }] });
+    setDirty(true);
+  }
+
+  function removeTriggerDefinition(index: number) {
+    if (!diary || diary.triggerCatalog[index]?.isBuiltIn) return;
+    captureHistory("Remove trigger catalogue item", `remove-trigger-definition:${index}`);
+    setDiary({ ...diary, triggerCatalog: diary.triggerCatalog.filter((_, itemIndex) => itemIndex !== index) });
+    setDirty(true);
+  }
+
+  function updateMedicationDefinition(index: number, updates: Partial<PortableDiary["medicationCatalog"][number]>) {
+    if (!diary) return;
+    const definition = diary.medicationCatalog[index];
+    if (!definition) return;
+    const nextName = updates.name?.trim() || definition.name;
+    if (nextName !== definition.name && diary.medicationCatalog.some((item, itemIndex) => itemIndex !== index && item.name.toLocaleLowerCase() === nextName.toLocaleLowerCase())) return;
+    captureHistory("Edit medicine catalogue", `medicine-definition:${index}`);
+    setDiary({
+      ...diary,
+      medicationCatalog: diary.medicationCatalog.map((item, itemIndex) => itemIndex === index ? { ...item, ...updates, name: nextName } : item),
+      days: nextName === definition.name ? diary.days : diary.days.map((day) => ({ ...day, medications: day.medications.map((item) => item.name === definition.name ? { ...item, name: nextName } : item) })),
+    });
+    setDirty(true);
+  }
+
+  function addMedicationDefinition() {
+    if (!diary) return;
+    const base = "Custom medicine";
+    let name = base;
+    let number = 2;
+    while (diary.medicationCatalog.some((item) => item.name === name)) name = `${base} ${number++}`;
+    captureHistory("Add medicine catalogue item", `add-medicine-definition:${name}`);
+    setDiary({ ...diary, medicationCatalog: [...diary.medicationCatalog, { name, emoji: "💊", isBuiltIn: false, isHidden: false }] });
+    setDirty(true);
+  }
+
+  function removeMedicationDefinition(index: number) {
+    if (!diary || diary.medicationCatalog[index]?.isBuiltIn) return;
+    captureHistory("Remove medicine catalogue item", `remove-medicine-definition:${index}`);
+    setDiary({ ...diary, medicationCatalog: diary.medicationCatalog.filter((_, itemIndex) => itemIndex !== index) });
+    setDirty(true);
+  }
+
+  function downloadTextFile(fileName: string, contents: string, mimeType: string) {
+    const url = URL.createObjectURL(new Blob([contents], { type: mimeType }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  }
+
+  function downloadCsvReport() {
+    downloadTextFile("headmon-backup-report.csv", backupCsv(filteredDays), "text/csv;charset=utf-8");
+  }
+
+  function openPrintableReport() {
+    const url = URL.createObjectURL(new Blob([backupReportHtml(filteredDays)], { type: "text/html;charset=utf-8" }));
+    window.open(url, "_blank", "noopener,noreferrer");
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+
+  function downloadCalendarJson() {
+    if (!diary) return;
+    downloadTextFile("headmon-calendar-backup.json", `${JSON.stringify({ ...diary, exportedAtEpochMillis: Date.now() }, null, 2)}\n`, "application/json");
+  }
+
+  async function loadComparisonFile(file: File | undefined) {
+    if (!file) return;
+    try {
+      const opened = await openBackup(file);
+      setComparison(opened);
+      setComparisonChoices(Object.fromEntries(compareDiaries(diary ?? opened.diary, opened.diary).conflictingDates.map((date) => [date, "current"])));
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof BackupValidationError ? caught.issues : ["The comparison backup could not be opened."]);
+    }
+  }
+
+  function safeMergedPhotoPath(id: string, originalPath: string): string {
+    const safeId = Array.from(id).map((character) => (/^[\p{L}\p{N}_-]$/u.test(character) ? character : "_")).join("").slice(0, 180);
+    const candidateExtension = originalPath.split(".").at(-1)?.toLocaleLowerCase() ?? "jpg";
+    const extension = /^[a-z0-9]{1,10}$/.test(candidateExtension) ? candidateExtension : "jpg";
+    return `photos/${safeId}.${extension}`;
+  }
+
+  function applyComparisonMerge() {
+    if (!bundle || !diary || !manifest || !comparison || !comparisonResult) return;
+    const chosenDates = new Set([
+      ...comparisonResult.missingDates,
+      ...comparisonResult.conflictingDates.filter((date) => comparisonChoices[date] === "incoming"),
+    ]);
+    if (chosenDates.size === 0) return;
+    captureHistory("Merge backup", `merge:${comparison.fileName}`);
+    const incomingDays = comparison.diary.days.filter((day) => chosenDates.has(day.date));
+    const nextDiary: PortableDiary = {
+      ...diary,
+      days: [...diary.days.filter((day) => !chosenDates.has(day.date)), ...structuredClone(incomingDays)],
+      triggerCatalog: [
+        ...diary.triggerCatalog,
+        ...comparison.diary.triggerCatalog.filter((incoming) => !diary.triggerCatalog.some((current) => current.name.toLocaleLowerCase() === incoming.name.toLocaleLowerCase())),
+      ],
+      medicationCatalog: [
+        ...diary.medicationCatalog,
+        ...comparison.diary.medicationCatalog.filter((incoming) => !diary.medicationCatalog.some((current) => current.name.toLocaleLowerCase() === incoming.name.toLocaleLowerCase())),
+      ],
+    };
+    const retainedAttachments = manifest.attachments.filter((item) => !chosenDates.has(item.date));
+    const nextEntries = { ...bundle.entries };
+    const usedPaths = new Set(retainedAttachments.map((item) => item.path));
+    const usedIds = new Set(retainedAttachments.map((item) => item.id));
+    const incomingAttachments = comparison.manifest.attachments.filter((item) => chosenDates.has(item.date)).map((item) => {
+      let next = structuredClone(item);
+      if (usedPaths.has(next.path) || usedIds.has(next.id)) {
+        next = { ...next, id: `${next.id}-merged-${crypto.randomUUID()}` };
+        next.path = safeMergedPhotoPath(next.id, item.path);
+      }
+      const bytes = comparison.entries[item.path];
+      if (bytes) nextEntries[next.path] = bytes;
+      usedPaths.add(next.path);
+      usedIds.add(next.id);
+      return next;
+    });
+    const nextManifest = { ...manifest, attachments: [...retainedAttachments, ...incomingAttachments] };
+    const nextWeather = [
+      ...weather.filter((item) => !chosenDates.has(item.date)),
+      ...structuredClone(comparison.weather.filter((item) => chosenDates.has(item.date))),
+    ];
+    const nextBundle = {
+      ...bundle,
+      fileName: bundle.fileName.toLowerCase().endsWith(".json") ? bundle.fileName.replace(/\.json$/i, "-working.zip") : bundle.fileName,
+      entries: nextEntries,
+    };
+    const mergedBlob = exportBackup(nextBundle, nextDiary, nextManifest, nextWeather);
+    setBundle(nextBundle);
+    setSourceBlob(mergedBlob);
+    setDiary(nextDiary);
+    setManifest(nextManifest);
+    setWeather(nextWeather);
+    setDirty(true);
+    setModifiedDates((current) => new Set([...current, ...chosenDates]));
+    setComparison(null);
+    setComparisonChoices({});
+    setWorkspaceView("entries");
+  }
+
+  async function discardChanges() {
     if (!bundle) return;
     setDiary(cloneDiary(bundle.diary));
     setManifest(structuredClone(bundle.manifest));
     setWeather(structuredClone(bundle.weather));
     setDirty(false);
     setModifiedDates(new Set());
+    historyRef.current = [];
+    redoRef.current = [];
+    setHistoryCounts({ undo: 0, redo: 0 });
+    if (archiveId) {
+      await deleteDraft(archiveId);
+      setDrafts(await listDrafts());
+      setDraftStatus("idle");
+    }
   }
 
   function downloadCorrectedBackup() {
@@ -539,9 +1109,16 @@ export default function BackupViewer() {
     setDiary(null);
     setManifest(null);
     setWeather([]);
+    setArchiveId(null);
+    setSourceBlob(null);
     setSelectedDate(null);
     setDirty(false);
     setModifiedDates(new Set());
+    setComparison(null);
+    setComparisonChoices({});
+    historyRef.current = [];
+    redoRef.current = [];
+    setHistoryCounts({ undo: 0, redo: 0 });
     setError(null);
   }
 
@@ -569,8 +1146,8 @@ export default function BackupViewer() {
           <div className="welcome-copy">
             <p className="eyebrow">Private backup tool</p>
             <h1>See what your diary remembers.</h1>
-            <p className="welcome-intro">Open a complete Headmon backup to browse your history and correct days, episodes, medication, triggers, weather, and photo captions. Your archive never leaves this device.</p>
-            <div className="trust-row" aria-label="Privacy guarantees"><span>No account</span><span>No upload</span><span>Original stays untouched</span></div>
+            <p className="welcome-intro">Open a complete ZIP or calendar JSON backup to browse, repair, compare, and report on your diary. Your archive never leaves this device.</p>
+            <div className="trust-row" aria-label="Privacy guarantees"><span>No account</span><span>No upload</span><span>Device-local drafts</span></div>
           </div>
 
           <div
@@ -582,11 +1159,25 @@ export default function BackupViewer() {
           >
             <div className="zip-icon" aria-hidden="true"><span>ZIP</span></div>
             <h2>{loading ? "Checking your backup…" : "Open a Headmon backup"}</h2>
-            <p>Drop any dated Headmon full-backup ZIP here or choose it from your device.</p>
-            <button className="primary-button" type="button" onClick={() => inputRef.current?.click()} disabled={loading}>{loading ? "Opening…" : "Choose backup ZIP"}</button>
-            <input ref={inputRef} type="file" accept=".zip,application/zip" onChange={handleFileInput} hidden />
+            <p>Drop any dated Headmon complete ZIP or calendar JSON backup here, or choose it from your device.</p>
+            <button className="primary-button" type="button" onClick={() => inputRef.current?.click()} disabled={loading}>{loading ? "Opening…" : "Choose backup"}</button>
+            <input ref={inputRef} type="file" accept=".zip,.json,application/zip,application/json" onChange={handleFileInput} hidden />
             <small>Current prototype limit: 512 MB</small>
           </div>
+
+          {drafts.length > 0 && (
+            <section className="draft-shelf" aria-labelledby="saved-drafts-title">
+              <div><p className="eyebrow">On this device</p><h2 id="saved-drafts-title">Continue a saved draft</h2><p>Drafts stay in this browser&apos;s private storage and are never sent to Headmon.</p></div>
+              <div className="draft-list">
+                {drafts.map((draft) => (
+                  <article className="draft-card" key={draft.id}>
+                    <div><strong>{draft.fileName}</strong><span>{draft.dayCount} days · saved {new Date(draft.savedAtEpochMillis).toLocaleString()}</span></div>
+                    <div><button className="compact-button" type="button" onClick={() => void resumeDraft(draft.id)}>Resume</button><button className="danger-button" type="button" onClick={() => void removeSavedDraft(draft.id)}>Delete</button></div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
 
           {error && (
             <div className="error-panel" role="alert">
@@ -617,15 +1208,39 @@ export default function BackupViewer() {
               <div><strong>{stats.filledNotes}</strong><span title="Day notes, episode notes, and photo captions">Filled notes</span></div>
             </div>
 
-            <div className="archive-note"><span className="privacy-dot" aria-hidden="true" /><p><strong>Still local.</strong> This archive exists only in your browser&apos;s working memory.</p></div>
+            <div className="archive-note"><span className="privacy-dot" aria-hidden="true" /><p><strong>Still local.</strong> Draft changes are saved only in this browser on this device.</p></div>
+            <p className={`draft-status ${draftStatus}`}>
+              {draftStatus === "saving" ? "Saving local draft…" : draftStatus === "saved" ? "Local draft saved" : draftStatus === "error" ? "Local draft could not be saved" : "No local draft yet"}
+            </p>
             {bundle.warnings.map((warning) => <p className="warning" key={warning}>{warning}</p>)}
             <button className="text-button" type="button" onClick={closeBackup}>Close this backup</button>
           </aside>
 
           <section className="entry-browser">
+            <nav className="workspace-tabs" aria-label="Backup workbench sections">
+              {([
+                ["entries", "Entries"],
+                ["calendar", "Calendar"],
+                ["photos", "Photos"],
+                ["catalogues", "Catalogues"],
+                ["reports", "Reports"],
+                ["compare", "Compare"],
+              ] as Array<[WorkspaceView, string]>).map(([value, label]) => (
+                <button className={workspaceView === value ? "is-active" : ""} type="button" key={value} onClick={() => setWorkspaceView(value)}>{label}</button>
+              ))}
+            </nav>
+
+            {workspaceView === "entries" && <>
             <div className="browser-heading">
               <div><p className="eyebrow">DIARY CONTENTS</p><h1>Your entries</h1><p>{stats.migraineDays} migraine days · {stats.headacheOnlyDays} headache-only days</p></div>
               <label className="search-field"><span className="sr-only">Search entries</span><input value={search} onChange={(event) => setSearch(event.target.value)} type="search" placeholder="Search notes, places, triggers…" /></label>
+            </div>
+
+            <div className="entry-tools">
+              <label className="control-field"><span>Status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}><option value="all">All entries</option><option value="migraine">Migraine</option><option value="headache">Headache</option><option value="aura">Aura only</option><option value="pain-free">Pain-free</option><option value="skipped">Skipped</option></select></label>
+              <label className="control-field"><span>From</span><input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label>
+              <label className="control-field"><span>To</span><input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
+              <div className="add-day-control"><label className="control-field"><span>Add missing day</span><input type="date" value={newDayDate} onChange={(event) => setNewDayDate(event.target.value)} /></label><button className="compact-button" type="button" onClick={addDay} disabled={!newDayDate}>Add day</button></div>
             </div>
 
             <div
@@ -655,12 +1270,13 @@ export default function BackupViewer() {
                         <div className="date-and-status"><h2>{formatDate(selectedDay.date)}</h2><span className={`status-badge ${statusFor(selectedDay).tone}`}>{statusFor(selectedDay).label}</span></div>
                         <p>{selectedDay.locationName || "No location"}{selectedDay.stressLevel != null ? ` · Stress ${selectedDay.stressLevel}/10` : ""}</p>
                       </div>
-                      {modifiedDates.has(selectedDay.date) && <span className="changed-badge">Modified</span>}
+                      <div className="editor-heading-actions">{modifiedDates.has(selectedDay.date) && <span className="changed-badge">Modified</span>}<button className="danger-button" type="button" onClick={deleteSelectedDay}>Remove day</button></div>
                     </div>
 
                     <section className="editor-section">
                       <div className="section-title"><h3>Day details</h3><span aria-hidden="true">☀</span></div>
                       <div className="day-detail-grid">
+                        <label className="control-field"><span>Entry date</span><input type="date" value={selectedDay.date} onChange={(event) => moveSelectedDay(event.target.value)} /></label>
                         <label className="control-field"><span>Stress (0–10, blank if unset)</span><input type="number" min="0" max="10" value={selectedDay.stressLevel ?? ""} onChange={(event) => updateDay((day) => ({ ...day, stressLevel: optionalNumber(event.target.value) }))} /></label>
                         <label className="check-control day-skip"><input type="checkbox" checked={selectedDay.isSkipped} disabled={selectedDay.episodes.length > 0} onChange={(event) => updateDay((day) => ({ ...day, isSkipped: event.target.checked }))} /><span>Marked as skipped</span></label>
                       </div>
@@ -677,7 +1293,7 @@ export default function BackupViewer() {
                     <section className="editor-section">
                       <label className="field-label" htmlFor="day-note">Day note</label>
                       <textarea id="day-note" value={selectedDay.note} maxLength={10_000} placeholder="No note for this day" onChange={(event) => updateDay((day) => ({ ...day, note: event.target.value }))} />
-                      <div className="field-meta"><span>Kept while this ZIP remains open</span><span>{selectedDay.note.length.toLocaleString()} characters</span></div>
+                      <div className="field-meta"><span>Saved to this device&apos;s local draft</span><span>{selectedDay.note.length.toLocaleString()} characters</span></div>
                     </section>
 
                     <section className="editor-section weather-section">
@@ -823,7 +1439,11 @@ export default function BackupViewer() {
                                   alt={attachment.note || "Backup attachment"}
                                 />
                               ) : <div className="photo-placeholder">Preview unavailable</div>}
-                              <figcaption><label className="control-field" htmlFor={`photo-note-${attachment.id}`}><span>Photo caption</span><input id={`photo-note-${attachment.id}`} value={attachment.note} maxLength={500} placeholder="Untitled photo" onChange={(event) => updateAttachmentNote(attachment.id, event.target.value)} /></label></figcaption>
+                              <figcaption>
+                                <label className="control-field" htmlFor={`photo-note-${attachment.id}`}><span>Photo caption</span><input id={`photo-note-${attachment.id}`} value={attachment.note} maxLength={500} placeholder="Untitled photo" onChange={(event) => updateAttachmentNote(attachment.id, event.target.value)} /></label>
+                                <label className="control-field"><span>Attached to</span><select value={attachment.episodeIndex === null ? "day" : String(attachment.episodeIndex)} onChange={(event) => moveAttachment(attachment.id, attachment.date, event.target.value === "day" ? null : Number(event.target.value))}><option value="day">The day</option>{selectedDay.episodes.map((episode, index) => <option value={index} key={episode.id}>Episode {index + 1} · {formatTime(episode.startTimeEpochMillis)}</option>)}</select></label>
+                                <div className="photo-actions"><button className="compact-button" type="button" onClick={() => downloadAttachment(attachment.id)}>Download</button><button className="danger-button" type="button" onClick={() => removeAttachment(attachment.id)}>Remove</button></div>
+                              </figcaption>
                             </figure>
                           ))}
                         </div>
@@ -833,11 +1453,72 @@ export default function BackupViewer() {
                 ) : <p className="empty-editor">Select an entry to inspect it.</p>}
               </article>
             </div>
+            </>}
+
+            {workspaceView === "calendar" && (
+              <section className="workspace-panel">
+                <div className="browser-heading"><div><p className="eyebrow">LARGE-SCREEN OVERVIEW</p><h1>Calendar</h1><p>{filteredDays.length} matching days</p></div></div>
+                <div className="entry-tools compact-filters">
+                  <label className="control-field"><span>Status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}><option value="all">All entries</option><option value="migraine">Migraine</option><option value="headache">Headache</option><option value="aura">Aura only</option><option value="pain-free">Pain-free</option><option value="skipped">Skipped</option></select></label>
+                  <label className="control-field"><span>From</span><input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label>
+                  <label className="control-field"><span>To</span><input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
+                </div>
+                <div className="calendar-months">
+                  {calendarMonths.map(([month, days]) => (
+                    <section className="calendar-month" key={month}><h2>{new Date(`${month}-15T12:00:00Z`).toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" })}</h2><div className="calendar-grid">{days.map((day) => { const status = statusFor(day); return <button type="button" className={`calendar-day ${status.tone}${modifiedDates.has(day.date) ? " is-edited" : ""}`} key={day.date} onClick={() => { setSelectedDate(day.date); setWorkspaceView("entries"); }}><span>{Number(day.date.slice(-2))}</span><small>{status.label}</small><strong>{day.episodes.length || "—"}</strong></button>; })}</div></section>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {workspaceView === "photos" && (
+              <section className="workspace-panel">
+                <div className="browser-heading"><div><p className="eyebrow">ATTACHMENTS</p><h1>Photo gallery</h1><p>{manifest.attachments.length} photos in this working backup</p></div></div>
+                {manifest.attachments.length === 0 ? <p className="workspace-empty">This backup has no photos.</p> : <div className="gallery-grid">{manifest.attachments.map((attachment) => {
+                  const targetDay = diary.days.find((day) => day.date === attachment.date);
+                  return <figure className="gallery-card" key={attachment.id}>{bundle.entries[attachment.path] ? <LocalBackupImage bytes={bundle.entries[attachment.path]} mimeType={attachment.mimeType} alt={attachment.note || `Photo from ${attachment.date}`} /> : <div className="photo-placeholder">Preview unavailable</div>}<figcaption><strong>{formatDate(attachment.date)}</strong><label className="control-field"><span>Caption</span><input value={attachment.note} maxLength={500} onChange={(event) => updateAttachmentNote(attachment.id, event.target.value)} /></label><label className="control-field"><span>Move to day</span><select value={attachment.date} onChange={(event) => moveAttachment(attachment.id, event.target.value, null)}>{sortedDays.map((day) => <option key={day.date} value={day.date}>{formatDate(day.date)}</option>)}</select></label>{targetDay && <label className="control-field"><span>Attach within day</span><select value={attachment.episodeIndex === null ? "day" : String(attachment.episodeIndex)} onChange={(event) => moveAttachment(attachment.id, attachment.date, event.target.value === "day" ? null : Number(event.target.value))}><option value="day">The day</option>{targetDay.episodes.map((episode, index) => <option value={index} key={episode.id}>Episode {index + 1}</option>)}</select></label>}<div className="photo-actions"><button className="compact-button" type="button" onClick={() => downloadAttachment(attachment.id)}>Download</button><button className="danger-button" type="button" onClick={() => removeAttachment(attachment.id)}>Remove</button></div></figcaption></figure>;
+                })}</div>}
+              </section>
+            )}
+
+            {workspaceView === "catalogues" && (
+              <section className="workspace-panel">
+                <div className="browser-heading"><div><p className="eyebrow">BACKUP DEFINITIONS</p><h1>Catalogues</h1><p>Correct custom choices and the defaults preserved with this diary.</p></div></div>
+                <div className="catalogue-columns">
+                  <section className="catalogue-panel"><div className="section-title section-title-actions"><div><h3>Triggers</h3><span>{diary.triggerCatalog.length}</span></div><button className="compact-button" type="button" onClick={addTriggerDefinition}>Add custom</button></div><div className="catalogue-list">{diary.triggerCatalog.map((item, index) => <article className="catalogue-row" key={`${item.name}-${index}`}><input aria-label="Trigger emoji" value={item.emoji ?? ""} maxLength={8} onChange={(event) => updateTriggerDefinition(index, { emoji: event.target.value })} /><input aria-label="Trigger name" value={item.name} disabled={item.isBuiltIn} onChange={(event) => updateTriggerDefinition(index, { name: event.target.value })} /><label className="check-control"><input type="checkbox" checked={item.isHidden} onChange={(event) => updateTriggerDefinition(index, { isHidden: event.target.checked })} /><span>Hidden</span></label>{!item.isBuiltIn && <button className="danger-button" type="button" onClick={() => removeTriggerDefinition(index)}>Remove</button>}</article>)}</div></section>
+                  <section className="catalogue-panel"><div className="section-title section-title-actions"><div><h3>Medicines</h3><span>{diary.medicationCatalog.length}</span></div><button className="compact-button" type="button" onClick={addMedicationDefinition}>Add custom</button></div><div className="catalogue-list">{diary.medicationCatalog.map((item, index) => <article className="catalogue-row medicine" key={`${item.name}-${index}`}><input aria-label="Medicine emoji" value={item.emoji} maxLength={8} onChange={(event) => updateMedicationDefinition(index, { emoji: event.target.value })} /><input aria-label="Medicine name" value={item.name} disabled={item.isBuiltIn} onChange={(event) => updateMedicationDefinition(index, { name: event.target.value })} /><input aria-label="Default dose in milligrams" type="number" min="0" max="99999" value={item.defaultDoseMg ?? ""} onChange={(event) => updateMedicationDefinition(index, { defaultDoseMg: optionalNumber(event.target.value) })} /><label className="check-control"><input type="checkbox" checked={item.isHidden} onChange={(event) => updateMedicationDefinition(index, { isHidden: event.target.checked })} /><span>Hidden</span></label>{!item.isBuiltIn && <button className="danger-button" type="button" onClick={() => removeMedicationDefinition(index)}>Remove</button>}</article>)}</div></section>
+                </div>
+              </section>
+            )}
+
+            {workspaceView === "reports" && (
+              <section className="workspace-panel">
+                <div className="browser-heading"><div><p className="eyebrow">LOCAL EXPORTS</p><h1>Reports</h1><p>CSV and printable reports use the current filters: {filteredDays.length} days selected. Calendar JSON keeps the entire edited diary.</p></div></div>
+                <div className="report-grid"><article><strong>Spreadsheet report</strong><p>Formula-safe CSV with statuses, medication, triggers, weather, and notes.</p><button className="primary-button" type="button" onClick={downloadCsvReport}>Download CSV</button></article><article><strong>Printable report</strong><p>Open a readable local report, then print or save it as a PDF.</p><button className="primary-button" type="button" onClick={openPrintableReport}>Open printable report</button></article><article><strong>Calendar backup</strong><p>Export the edited diary and catalogues as portable Headmon JSON without photos or weather history.</p><button className="secondary-button" type="button" onClick={downloadCalendarJson}>Download JSON</button></article></div>
+                <p className="privacy-warning"><strong>Keep reports private.</strong> CSV, HTML/PDF, and JSON files can contain sensitive health information, exact dates, places, and notes.</p>
+              </section>
+            )}
+
+            {workspaceView === "compare" && (
+              <section className="workspace-panel">
+                <div className="browser-heading"><div><p className="eyebrow">RECOVERY TOOL</p><h1>Compare backups</h1><p>Bring missing dates across and choose deliberately when the same date differs.</p></div></div>
+                <div className="compare-picker"><button className="primary-button" type="button" onClick={() => compareInputRef.current?.click()}>Choose second backup</button><input ref={compareInputRef} type="file" accept=".zip,.json,application/zip,application/json" hidden onChange={(event) => { void loadComparisonFile(event.target.files?.[0]); event.target.value = ""; }} />{comparison && <span>{comparison.fileName} · {bundleLabel(comparison)}</span>}</div>
+                {comparisonResult && comparison && <div className="comparison-results"><div className="comparison-summary"><article><strong>{comparisonResult.missingDates.length}</strong><span>Missing here</span></article><article><strong>{comparisonResult.conflictingDates.length}</strong><span>Conflicts</span></article><article><strong>{comparisonResult.matchingDates.length}</strong><span>Already identical</span></article></div>{comparisonResult.missingDates.length > 0 && <section><h2>Dates that will be added</h2><div className="date-chip-row">{comparisonResult.missingDates.map((date) => <span key={date}>{formatDate(date)}</span>)}</div></section>}{comparisonResult.conflictingDates.length > 0 && <section><h2>Choose each conflict</h2><div className="conflict-list">{comparisonResult.conflictingDates.map((date) => <article key={date}><strong>{formatDate(date)}</strong><label><input type="radio" name={`conflict-${date}`} checked={(comparisonChoices[date] ?? "current") === "current"} onChange={() => setComparisonChoices((current) => ({ ...current, [date]: "current" }))} /> Keep current</label><label><input type="radio" name={`conflict-${date}`} checked={comparisonChoices[date] === "incoming"} onChange={() => setComparisonChoices((current) => ({ ...current, [date]: "incoming" }))} /> Use incoming</label></article>)}</div></section>}<div className="compare-actions"><button className="primary-button" type="button" onClick={applyComparisonMerge} disabled={comparisonResult.missingDates.length === 0 && !comparisonResult.conflictingDates.some((date) => comparisonChoices[date] === "incoming")}>Apply selected merge</button><button className="secondary-button" type="button" onClick={() => { setComparison(null); setComparisonChoices({}); }}>Clear comparison</button></div><p className="field-help">The current backup remains the base. Incoming dates, their weather, catalogue definitions, and attached photos are copied only when selected.</p></div>}
+              </section>
+            )}
           </section>
 
+          {showChangeReview && (
+            <aside className="change-review" aria-label="Change review">
+              <div><p className="eyebrow">BEFORE EXPORT</p><h2>Review changes</h2></div>
+              {changeDetails.length === 0 ? <p>No differences from the opened backup were detected.</p> : <div className="change-list">{changeDetails.map((row) => <article key={row.date}><strong>{row.date === "Catalogue" ? row.date : formatDate(row.date)}</strong><span>{row.changes.join(" · ")}</span></article>)}</div>}
+              <button className="text-button" type="button" onClick={() => setShowChangeReview(false)}>Close review</button>
+            </aside>
+          )}
+
           <footer className="save-bar">
-            <div><strong>{dirty ? `${modifiedDates.size} edited ${modifiedDates.size === 1 ? "day" : "days"} in this session` : "No changes yet"}</strong>{error ? <span className="save-error">{error[0]}</span> : <span>{dirty ? "Switch days freely. Export before refreshing or closing." : "Changes stay in memory until you export a corrected ZIP."}</span>}</div>
-            <div className="save-actions"><button className="secondary-button" type="button" onClick={discardChanges} disabled={!dirty}>Discard changes</button><button className="primary-button" type="button" onClick={downloadCorrectedBackup} disabled={!dirty}>Export corrected ZIP</button></div>
+            <div><strong>{dirty ? modifiedDates.size > 0 ? `${modifiedDates.size} edited ${modifiedDates.size === 1 ? "day" : "days"}` : "Backup definitions edited" : "No changes yet"}</strong>{error ? <span className="save-error">{error[0]}</span> : <span>{dirty ? draftStatus === "saved" ? "Draft saved locally. Export when the corrected backup is ready." : "Saving a device-local draft…" : "Open entries, compare archives, or create a report."}</span>}</div>
+            <div className="save-actions"><button className="secondary-button" type="button" onClick={undoChange} disabled={historyCounts.undo === 0}>Undo</button><button className="secondary-button" type="button" onClick={redoChange} disabled={historyCounts.redo === 0}>Redo</button><button className="secondary-button" type="button" onClick={() => setShowChangeReview((current) => !current)} disabled={!dirty}>Review</button><button className="secondary-button" type="button" onClick={() => void discardChanges()} disabled={!dirty}>Discard</button><button className="primary-button" type="button" onClick={downloadCorrectedBackup} disabled={!dirty}>Export corrected ZIP</button></div>
           </footer>
           </div>
         )}

@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Backup viewer | Headmon",
-  description: "A local-only viewer and editor for Headmon full backups.",
+  description: "A device-local workbench for viewing, repairing, comparing, and reporting on Headmon backups.",
   icons: {
     icon: "/headmon-icon.png",
     shortcut: "/headmon-icon.png",

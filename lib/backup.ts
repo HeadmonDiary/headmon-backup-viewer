@@ -264,9 +264,46 @@ function validateDiary(value: unknown): PortableDiary {
   }
   if (!Array.isArray(diary.triggerCatalog)) diary.triggerCatalog = [];
   if (!Array.isArray(diary.medicationCatalog)) diary.medicationCatalog = [];
+  diary.omittedAttachmentCount ??= 0;
+  diary.triggerCatalog = diary.triggerCatalog.map((item) => ({
+    ...item,
+    emoji: item.emoji ?? null,
+    isBuiltIn: item.isBuiltIn ?? false,
+    isHidden: item.isHidden ?? false,
+  }));
+  diary.medicationCatalog = diary.medicationCatalog.map((item) => ({
+    ...item,
+    emoji: item.emoji ?? "💊",
+    isBuiltIn: item.isBuiltIn ?? false,
+    isHidden: item.isHidden ?? false,
+  }));
   if (!Array.isArray(diary.days)) {
     issues.push("The diary has no day list.");
   } else {
+    diary.days = diary.days.map((day) => ({
+      ...day,
+      note: day.note ?? "",
+      isSkipped: day.isSkipped ?? false,
+      weatherCondition: day.weatherCondition ?? "",
+      pressureTrend: day.pressureTrend ?? "",
+      locationName: day.locationName ?? "",
+      triggers: day.triggers ?? [],
+      episodes: (day.episodes ?? []).map((episode) => ({
+        ...episode,
+        endTimeEpochMillis: episode.endTimeEpochMillis ?? 0,
+        isMigraine: episode.isMigraine ?? false,
+        migraineIntensity: episode.migraineIntensity ?? 0,
+        hadAura: episode.hadAura ?? false,
+        hadNausea: episode.hadNausea ?? false,
+        lightSensitivity: episode.lightSensitivity ?? false,
+        soundSensitivity: episode.soundSensitivity ?? false,
+        migraineMedicationHelped: episode.migraineMedicationHelped ?? false,
+        note: episode.note ?? "",
+        isAuraOnly: episode.isAuraOnly ?? false,
+        triggers: episode.triggers ?? [],
+      })),
+      medications: day.medications ?? [],
+    }));
     const dates = new Set<string>();
     const episodeIds = new Set<string>();
     const medicationIds = new Set<string>();
@@ -390,16 +427,52 @@ function validateDiary(value: unknown): PortableDiary {
 }
 
 export async function openBackup(file: File): Promise<BackupBundle> {
-  if (!file.name.toLowerCase().endsWith(".zip")) {
-    throw new BackupValidationError(["Choose a Headmon full-backup ZIP file."]);
-  }
   if (file.size > MAX_BROWSER_ARCHIVE_BYTES) {
     throw new BackupValidationError(["This prototype currently supports backups up to 512 MB."]);
   }
 
+  const fileBytes = new Uint8Array(await file.arrayBuffer());
+  if (file.name.toLowerCase().endsWith(".json")) {
+    const diary = validateDiary(parseJson<unknown>(fileBytes, file.name));
+    const manifest: BackupManifest = {
+      format: FULL_BACKUP_FORMAT,
+      formatVersion: FULL_BACKUP_VERSION,
+      exportedAtEpochMillis: diary.exportedAtEpochMillis,
+      sourcePlatform: diary.sourcePlatform,
+      diaryPath: "diary.json",
+      weatherHistoryPath: "weather-history.json",
+      attachments: [],
+    };
+    validateManifest(manifest);
+    const weather: WeatherRecord[] = [];
+    const warnings = [
+      "This calendar backup does not contain photo files or continuous weather history.",
+    ];
+    if (diary.formatVersion === 1) warnings.push("This archive uses the older diary format.");
+    if (diary.omittedAttachmentCount > 0) {
+      warnings.push(`${diary.omittedAttachmentCount} attachment(s) were omitted when the diary was created.`);
+    }
+    return {
+      fileName: file.name,
+      manifest,
+      diary,
+      weather,
+      entries: {
+        "manifest.json": strToU8(`${JSON.stringify(manifest, null, 2)}\n`),
+        "diary.json": fileBytes,
+        "weather-history.json": strToU8("[]\n"),
+      },
+      warnings,
+    };
+  }
+
+  if (!file.name.toLowerCase().endsWith(".zip")) {
+    throw new BackupValidationError(["Choose a Headmon complete ZIP or calendar JSON backup."]);
+  }
+
   let entries: Record<string, Uint8Array>;
   try {
-    entries = unzipSync(new Uint8Array(await file.arrayBuffer()));
+    entries = unzipSync(fileBytes);
   } catch {
     throw new BackupValidationError(["The ZIP could not be opened."]);
   }
@@ -493,10 +566,17 @@ export function exportBackup(
     }
   }
 
-  const entries = { ...bundle.entries };
+  const entries: Record<string, Uint8Array> = {};
   entries["manifest.json"] = strToU8(`${JSON.stringify(manifest, null, 2)}\n`);
   entries[manifest.diaryPath] = strToU8(`${JSON.stringify(diary, null, 2)}\n`);
   entries[manifest.weatherHistoryPath] = strToU8(`${JSON.stringify(weather, null, 2)}\n`);
+  for (const attachment of manifest.attachments) {
+    const bytes = bundle.entries[attachment.path];
+    if (!bytes) {
+      throw new BackupValidationError(["A referenced photo is missing from the working backup."]);
+    }
+    entries[attachment.path] = bytes;
+  }
   const archive = zipSync(entries, { level: 0 });
   const bytes = archive.buffer.slice(
     archive.byteOffset,
@@ -506,5 +586,5 @@ export function exportBackup(
 }
 
 export function correctedFileName(original: string): string {
-  return original.replace(/\.zip$/i, "") + "-corrected.zip";
+  return original.replace(/\.(zip|json)$/i, "") + "-corrected.zip";
 }

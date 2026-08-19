@@ -65,4 +65,54 @@ test("accepts an iOS day-level photo with omitted episodeIndex", async () => {
   const corrected = exportBackup(opened, opened.diary);
   const reopened = await openBackup(new File([await corrected.arrayBuffer()], "corrected.zip"));
   assert.equal(reopened.manifest.attachments[0].episodeIndex, null);
+
+  const withoutPhoto = exportBackup(opened, opened.diary, {
+    ...opened.manifest,
+    attachments: [],
+  });
+  const reopenedWithoutPhoto = await openBackup(new File([await withoutPhoto.arrayBuffer()], "without-photo.zip"));
+  assert.equal(reopenedWithoutPhoto.manifest.attachments.length, 0);
+});
+
+test("opens portable calendar JSON from both supported source platforms", async () => {
+  for (const sourcePlatform of ["ios", "android"]) {
+    const portable = { ...diary, sourcePlatform };
+    const opened = await openBackup(new File(
+      [JSON.stringify(portable)],
+      `${sourcePlatform}-calendar.json`,
+      { type: "application/json" },
+    ));
+    assert.equal(opened.manifest.sourcePlatform, sourcePlatform);
+    assert.equal(opened.diary.days.length, 1);
+    assert.equal(opened.weather.length, 0);
+    assert.match(opened.warnings[0], /does not contain photo files/i);
+
+    const corrected = exportBackup(opened, opened.diary);
+    const reopened = await openBackup(new File([await corrected.arrayBuffer()], `${sourcePlatform}-corrected.zip`));
+    assert.equal(reopened.diary.sourcePlatform, sourcePlatform);
+  }
+});
+
+test("applies portable-schema defaults omitted by Android JSON serialization", async () => {
+  const minimalAndroidDiary = {
+    format: "headmon-portable-backup",
+    formatVersion: 2,
+    exportedAtEpochMillis: 1,
+    sourcePlatform: "android",
+    days: [{
+      date: "2026-08-13",
+      hadHeadache: false,
+      triggers: [],
+      episodes: [],
+      medications: [],
+    }],
+  };
+  const opened = await openBackup(new File(
+    [JSON.stringify(minimalAndroidDiary)],
+    "android-calendar.json",
+    { type: "application/json" },
+  ));
+  assert.equal(opened.diary.days[0].note, "");
+  assert.equal(opened.diary.days[0].weatherCondition, "");
+  assert.equal(opened.diary.omittedAttachmentCount, 0);
 });
