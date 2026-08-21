@@ -27,7 +27,7 @@ async function render() {
   );
 }
 
-test("server-renders the private backup viewer", async () => {
+test("server-renders the backup viewer", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
