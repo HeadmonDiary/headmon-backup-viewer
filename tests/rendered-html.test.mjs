@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 
 const developmentPreviewMeta =
@@ -47,4 +47,16 @@ test("server-renders the private backup viewer", async () => {
 
 test("removes the temporary starter preview", async () => {
   await assert.rejects(access(previewRoot));
+});
+
+test("static shell explains script use and refuses framed operation", async () => {
+  const staticHtml = await readFile(new URL("../static/index.html", import.meta.url), "utf8");
+  const staticEntry = await readFile(new URL("../static/main.tsx", import.meta.url), "utf8");
+  const viewer = await readFile(new URL("../app/BackupViewer.tsx", import.meta.url), "utf8");
+
+  assert.match(staticHtml, /<noscript>/i);
+  assert.match(staticHtml, /viewer deliberately runs in your browser/i);
+  assert.match(staticEntry, /window\.self !== window\.top/);
+  assert.match(staticEntry, /does not run the backup viewer inside another website/i);
+  assert.match(viewer, /className="skip-link"/);
 });

@@ -1085,6 +1085,7 @@ export default function BackupViewer() {
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#top">Skip to content</a>
       <header className="site-header">
         <a className="site-brand" href="https://headmondiary.com/" aria-label="Headmon home">
           {/* eslint-disable-next-line @next/next/no-img-element */}
