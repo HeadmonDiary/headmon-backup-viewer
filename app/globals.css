@@ -401,29 +401,6 @@ button:disabled { cursor: not-allowed; opacity: 0.45; box-shadow: none; }
 }
 .site-footer a { color: var(--green-dark); text-underline-offset: 0.18em; }
 
-.draft-shelf {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: minmax(220px, 0.65fr) minmax(0, 1.35fr);
-  gap: 24px;
-  padding: 24px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 1.5rem;
-  box-shadow: var(--shadow);
-}
-.draft-shelf h2 { margin: 0; font-size: 24px; }
-.draft-shelf p:not(.eyebrow) { margin: 7px 0 0; color: var(--muted); font-size: 13px; }
-.draft-list { display: grid; gap: 8px; }
-.draft-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; background: var(--surface-muted); border: 1px solid var(--line); border-radius: 12px; }
-.draft-card > div:first-child { display: grid; min-width: 0; gap: 3px; }
-.draft-card strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
-.draft-card span { color: var(--muted); font-size: 11px; }
-.draft-card > div:last-child { display: flex; gap: 6px; }
-.draft-status { margin: 10px 0 0; color: var(--muted); font-size: 11px; }
-.draft-status.saved { color: var(--green-dark); }
-.draft-status.error { color: var(--danger-text); }
-
 .workspace-tabs {
   display: flex;
   gap: 6px;
@@ -530,7 +507,6 @@ button:disabled { cursor: not-allowed; opacity: 0.45; box-shadow: none; }
 @media (max-width: 920px) {
   .welcome { grid-template-columns: 1fr; padding-top: 1rem; }
   .welcome-copy { max-width: 720px; }
-  .draft-shelf { grid-template-columns: 1fr; }
   .viewer-layout { grid-template-columns: 1fr; }
   .archive-sidebar { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .archive-file, .archive-facts { border-bottom: 0; }
@@ -579,7 +555,6 @@ button:disabled { cursor: not-allowed; opacity: 0.45; box-shadow: none; }
 
 @media (max-width: 480px) {
   .entry-tools, .entry-tools.compact-filters { grid-template-columns: 1fr; }
-  .draft-card { align-items: stretch; flex-direction: column; }
   .calendar-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .day-detail-grid, .context-form-grid, .episode-form-grid, .weather-grid { grid-template-columns: 1fr; }
   .wide-field { grid-column: auto; }

@@ -21,15 +21,7 @@ import {
   exportBackup,
   openBackup,
 } from "@/lib/backup";
-import {
-  type BackupDraft,
-  type BackupDraftSummary,
-  deleteDraft,
-  draftIdForFile,
-  listDrafts,
-  loadDraft,
-  saveDraft,
-} from "@/lib/drafts";
+import { deleteLegacyDraftDatabase } from "@/lib/drafts";
 import {
   backupCsv,
   backupReportHtml,
@@ -273,10 +265,6 @@ export default function BackupViewer() {
   const [diary, setDiary] = useState<PortableDiary | null>(null);
   const [manifest, setManifest] = useState<BackupManifest | null>(null);
   const [weather, setWeather] = useState<WeatherRecord[]>([]);
-  const [archiveId, setArchiveId] = useState<string | null>(null);
-  const [sourceBlob, setSourceBlob] = useState<Blob | null>(null);
-  const [drafts, setDrafts] = useState<BackupDraftSummary[]>([]);
-  const [draftStatus, setDraftStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -296,7 +284,12 @@ export default function BackupViewer() {
   const [error, setError] = useState<string[] | null>(null);
 
   useEffect(() => {
-    void listDrafts().then(setDrafts).catch(() => setDraftStatus("error"));
+    // Remove complete archives retained by earlier versions. The current
+    // viewer deliberately keeps opened health data in memory only.
+    void deleteLegacyDraftDatabase().catch(() => {
+      // Storage can be unavailable in hardened browsing modes. The viewer
+      // remains memory-only even when a legacy database cannot be inspected.
+    });
   }, []);
 
   useEffect(() => {
@@ -315,30 +308,6 @@ export default function BackupViewer() {
     observer.observe(editor);
     return () => observer.disconnect();
   }, [bundle]);
-
-  useEffect(() => {
-    if (!dirty || !archiveId || !sourceBlob || !bundle || !diary || !manifest) return;
-    const timer = window.setTimeout(() => {
-      setDraftStatus("saving");
-      const draft: BackupDraft = {
-        id: archiveId,
-        fileName: bundle.fileName,
-        sourceBlob,
-        savedAtEpochMillis: Date.now(),
-        diary: structuredClone(diary),
-        manifest: structuredClone(manifest),
-        weather: structuredClone(weather),
-        modifiedDates: [...modifiedDates],
-      };
-      void saveDraft(draft)
-        .then(async () => {
-          setDraftStatus("saved");
-          setDrafts(await listDrafts());
-        })
-        .catch(() => setDraftStatus("error"));
-    }, 1_200);
-    return () => window.clearTimeout(timer);
-  }, [archiveId, bundle, diary, dirty, manifest, modifiedDates, sourceBlob, weather]);
 
   const sortedDays = useMemo(
     () => [...(diary?.days ?? [])].sort((a, b) => b.date.localeCompare(a.date)),
@@ -476,7 +445,6 @@ export default function BackupViewer() {
 
   function captureHistory(label: string, key = label) {
     if (!diary || !manifest) return;
-    setDraftStatus("saving");
     if (lastHistoryRef.current?.key === key) return;
     historyRef.current.push({
       label,
@@ -531,24 +499,20 @@ export default function BackupViewer() {
     setHistoryCounts({ undo: historyRef.current.length, redo: redoRef.current.length });
   }
 
-  async function loadFile(file: File | undefined, restoredDraft?: BackupDraft | null) {
+  async function loadFile(file: File | undefined) {
     if (!file) return;
     setLoading(true);
     setError(null);
     try {
       const opened = await openBackup(file);
-      const id = restoredDraft?.id ?? draftIdForFile(file);
-      const stored = restoredDraft ?? await loadDraft(id);
-      const nextDiary = cloneDiary(stored?.diary ?? opened.diary);
-      const nextManifest = structuredClone(stored?.manifest ?? opened.manifest);
-      const nextWeather = structuredClone(stored?.weather ?? opened.weather);
+      const nextDiary = cloneDiary(opened.diary);
+      const nextManifest = structuredClone(opened.manifest);
+      const nextWeather = structuredClone(opened.weather);
       const newestDate = [...nextDiary.days].sort((a, b) => b.date.localeCompare(a.date))[0]?.date ?? null;
       setBundle(opened);
       setDiary(nextDiary);
       setManifest(nextManifest);
       setWeather(nextWeather);
-      setArchiveId(id);
-      setSourceBlob(stored?.sourceBlob ?? file);
       setSelectedDate(newestDate);
       setSearch("");
       setStatusFilter("all");
@@ -557,10 +521,8 @@ export default function BackupViewer() {
       setWorkspaceView("entries");
       setComparison(null);
       setComparisonChoices({});
-      const restoredDirty = Boolean(stored) || workspaceIsDirty(opened, nextDiary, nextManifest, nextWeather);
-      setDirty(restoredDirty);
-      setModifiedDates(stored?.modifiedDates ? new Set(stored.modifiedDates) : changedDatesFor(opened, nextDiary, nextManifest, nextWeather));
-      setDraftStatus(stored ? "saved" : "idle");
+      setDirty(workspaceIsDirty(opened, nextDiary, nextManifest, nextWeather));
+      setModifiedDates(changedDatesFor(opened, nextDiary, nextManifest, nextWeather));
       historyRef.current = [];
       redoRef.current = [];
       lastHistoryRef.current = null;
@@ -571,8 +533,6 @@ export default function BackupViewer() {
       setManifest(null);
       setWeather([]);
       setSelectedDate(null);
-      setArchiveId(null);
-      setSourceBlob(null);
       setModifiedDates(new Set());
       setError(
         caught instanceof BackupValidationError
@@ -582,28 +542,6 @@ export default function BackupViewer() {
     } finally {
       setLoading(false);
     }
-  }
-
-  async function resumeDraft(id: string) {
-    setLoading(true);
-    try {
-      const draft = await loadDraft(id);
-      if (!draft) throw new Error("Draft missing");
-      const file = new File([draft.sourceBlob], draft.fileName, {
-        type: draft.fileName.toLowerCase().endsWith(".json") ? "application/json" : "application/zip",
-        lastModified: draft.savedAtEpochMillis,
-      });
-      await loadFile(file, draft);
-    } catch {
-      setError(["That local draft could not be reopened. Its original backup may need to be selected again."]);
-      setLoading(false);
-    }
-  }
-
-  async function removeSavedDraft(id: string) {
-    await deleteDraft(id);
-    setDrafts(await listDrafts());
-    if (archiveId === id) setDraftStatus("idle");
   }
 
   function handleFileInput(event: ChangeEvent<HTMLInputElement>) {
@@ -1064,9 +1002,9 @@ export default function BackupViewer() {
       fileName: bundle.fileName.toLowerCase().endsWith(".json") ? bundle.fileName.replace(/\.json$/i, "-working.zip") : bundle.fileName,
       entries: nextEntries,
     };
-    const mergedBlob = exportBackup(nextBundle, nextDiary, nextManifest, nextWeather);
+    // Validate the merged archive before replacing the in-memory workspace.
+    exportBackup(nextBundle, nextDiary, nextManifest, nextWeather);
     setBundle(nextBundle);
-    setSourceBlob(mergedBlob);
     setDiary(nextDiary);
     setManifest(nextManifest);
     setWeather(nextWeather);
@@ -1077,7 +1015,7 @@ export default function BackupViewer() {
     setWorkspaceView("entries");
   }
 
-  async function discardChanges() {
+  function discardChanges() {
     if (!bundle) return;
     setDiary(cloneDiary(bundle.diary));
     setManifest(structuredClone(bundle.manifest));
@@ -1087,11 +1025,6 @@ export default function BackupViewer() {
     historyRef.current = [];
     redoRef.current = [];
     setHistoryCounts({ undo: 0, redo: 0 });
-    if (archiveId) {
-      await deleteDraft(archiveId);
-      setDrafts(await listDrafts());
-      setDraftStatus("idle");
-    }
   }
 
   function downloadBlob(blob: Blob, fileName: string) {
@@ -1139,8 +1072,6 @@ export default function BackupViewer() {
     setDiary(null);
     setManifest(null);
     setWeather([]);
-    setArchiveId(null);
-    setSourceBlob(null);
     setSelectedDate(null);
     setDirty(false);
     setModifiedDates(new Set());
@@ -1157,7 +1088,7 @@ export default function BackupViewer() {
       <header className="site-header">
         <a className="site-brand" href="https://headmondiary.com/" aria-label="Headmon home">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={`${import.meta.env.BASE_URL}headmon-icon.png`} alt="" />
+          <img src="/bv/headmon-icon.png" alt="" />
           <span>Headmon</span>
         </a>
         <nav className="site-nav" aria-label="Primary navigation">
@@ -1171,13 +1102,13 @@ export default function BackupViewer() {
       </header>
 
       <main className="site-main" id="top">
-        {!bundle ? (
+        {!bundle || !diary || !manifest ? (
           <section className="welcome">
           <div className="welcome-copy">
             <p className="eyebrow">Private backup tool</p>
             <h1>See what your diary remembers.</h1>
-            <p className="welcome-intro">Open a complete ZIP or calendar JSON backup to browse, repair, compare, and report on your diary. Your archive never leaves this device.</p>
-            <div className="trust-row" aria-label="Privacy guarantees"><span>No account</span><span>No upload</span><span>Device-local drafts</span></div>
+            <p className="welcome-intro">Open a complete ZIP or calendar JSON backup to browse, repair, compare, and report on your diary. Headmon processes it only in this tab and never uploads or saves it in browser storage.</p>
+            <div className="trust-row" role="group" aria-label="Privacy guarantees"><span>No account</span><span>No upload</span><span>No persistent browser storage</span></div>
           </div>
 
           <div
@@ -1192,22 +1123,8 @@ export default function BackupViewer() {
             <p>Drop any dated Headmon complete ZIP or calendar JSON backup here, or choose it from your device.</p>
             <button className="primary-button" type="button" onClick={() => inputRef.current?.click()} disabled={loading}>{loading ? "Opening…" : "Choose backup"}</button>
             <input ref={inputRef} type="file" accept=".zip,.json,application/zip,application/json" onChange={handleFileInput} hidden />
-            <small>Current prototype limit: 512 MB</small>
+            <small>Maximum archive size: 256 MB</small>
           </div>
-
-          {drafts.length > 0 && (
-            <section className="draft-shelf" aria-labelledby="saved-drafts-title">
-              <div><p className="eyebrow">On this device</p><h2 id="saved-drafts-title">Continue a saved draft</h2><p>Drafts stay in this browser&apos;s private storage and are never sent to Headmon.</p></div>
-              <div className="draft-list">
-                {drafts.map((draft) => (
-                  <article className="draft-card" key={draft.id}>
-                    <div><strong>{draft.fileName}</strong><span>{draft.dayCount} days · saved {new Date(draft.savedAtEpochMillis).toLocaleString()}</span></div>
-                    <div><button className="compact-button" type="button" onClick={() => void resumeDraft(draft.id)}>Resume</button><button className="danger-button" type="button" onClick={() => void removeSavedDraft(draft.id)}>Delete</button></div>
-                  </article>
-                ))}
-              </div>
-            </section>
-          )}
 
           {error && (
             <div className="error-panel" role="alert">
@@ -1238,10 +1155,7 @@ export default function BackupViewer() {
               <div><strong>{stats.filledNotes}</strong><span title="Day notes, episode notes, and photo captions">Filled notes</span></div>
             </div>
 
-            <div className="archive-note"><span className="privacy-dot" aria-hidden="true" /><p><strong>Still local.</strong> Draft changes are saved only in this browser on this device.</p></div>
-            <p className={`draft-status ${draftStatus}`}>
-              {draftStatus === "saving" ? "Saving local draft…" : draftStatus === "saved" ? "Local draft saved" : draftStatus === "error" ? "Local draft could not be saved" : "No local draft yet"}
-            </p>
+            <div className="archive-note"><span className="privacy-dot" aria-hidden="true" /><p><strong>Memory only.</strong> Changes disappear when you close or reload this tab unless you export them.</p></div>
             {bundle.warnings.map((warning) => <p className="warning" key={warning}>{warning}</p>)}
             <button className="text-button" type="button" onClick={closeBackup}>Close this backup</button>
           </aside>
@@ -1323,7 +1237,7 @@ export default function BackupViewer() {
                     <section className="editor-section">
                       <label className="field-label" htmlFor="day-note">Day note</label>
                       <textarea id="day-note" value={selectedDay.note} maxLength={10_000} placeholder="No note for this day" onChange={(event) => updateDay((day) => ({ ...day, note: event.target.value }))} />
-                      <div className="field-meta"><span>Saved to this device&apos;s local draft</span><span>{selectedDay.note.length.toLocaleString()} characters</span></div>
+                      <div className="field-meta"><span>Kept only in this tab until export</span><span>{selectedDay.note.length.toLocaleString()} characters</span></div>
                     </section>
 
                     <section className="editor-section weather-section">
@@ -1547,8 +1461,8 @@ export default function BackupViewer() {
           )}
 
           <footer className="save-bar">
-            <div><strong>{dirty ? modifiedDates.size > 0 ? `${modifiedDates.size} edited ${modifiedDates.size === 1 ? "day" : "days"}` : "Backup definitions edited" : "No changes yet"}</strong>{error ? <span className="save-error">{error[0]}</span> : <span>{dirty ? draftStatus === "saved" ? "Draft saved locally. Export when the corrected backup is ready." : "Saving a device-local draft…" : "Open entries, compare archives, or create a report."}</span>}</div>
-            <div className="save-actions"><button className="secondary-button" type="button" onClick={undoChange} disabled={historyCounts.undo === 0}>Undo</button><button className="secondary-button" type="button" onClick={redoChange} disabled={historyCounts.redo === 0}>Redo</button><button className="secondary-button" type="button" onClick={() => setShowChangeReview((current) => !current)} disabled={!dirty}>Review</button><button className="secondary-button" type="button" onClick={() => void discardChanges()} disabled={!dirty}>Discard</button><button className="primary-button" type="button" onClick={() => void downloadCorrectedBackup()} disabled={!dirty}>Export corrected ZIP</button></div>
+            <div><strong>{dirty ? modifiedDates.size > 0 ? `${modifiedDates.size} edited ${modifiedDates.size === 1 ? "day" : "days"}` : "Backup definitions edited" : "No changes yet"}</strong>{error ? <span className="save-error">{error[0]}</span> : <span>{dirty ? "Changes exist only in this tab. Export before closing or reloading." : "Open entries, compare archives, or create a report."}</span>}</div>
+            <div className="save-actions"><button className="secondary-button" type="button" onClick={undoChange} disabled={historyCounts.undo === 0}>Undo</button><button className="secondary-button" type="button" onClick={redoChange} disabled={historyCounts.redo === 0}>Redo</button><button className="secondary-button" type="button" onClick={() => setShowChangeReview((current) => !current)} disabled={!dirty}>Review</button><button className="secondary-button" type="button" onClick={discardChanges} disabled={!dirty}>Discard</button><button className="primary-button" type="button" onClick={() => void downloadCorrectedBackup()} disabled={!dirty}>Export corrected ZIP</button></div>
           </footer>
           </div>
         )}

@@ -39,7 +39,8 @@ test("server-renders the private backup viewer", async () => {
   assert.match(html, /© 2026 Headmon/);
   assert.match(html, /See what your diary remembers\./);
   assert.match(html, /browse, repair, compare, and report on your diary/i);
-  assert.match(html, /Your archive never leaves this device\./);
+  assert.match(html, /never uploads or saves it in browser storage\./);
+  assert.match(html, /No persistent browser storage/);
   assert.match(html, /complete ZIP or calendar JSON backup/i);
   assert.match(html, /Choose backup/);
 });

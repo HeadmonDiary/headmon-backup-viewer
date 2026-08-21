@@ -2,7 +2,11 @@ import type { BackupBundle, BackupDay, PortableDiary } from "./backup";
 
 function csvCell(value: unknown): string {
   const text = value == null ? "" : String(value);
-  const formulaSafe = /^[=+\-@]/.test(text) ? `'${text}` : text;
+  // Spreadsheet programs may ignore leading whitespace or control characters
+  // before interpreting a formula. Prefix every such value as literal text.
+  const formulaSafe = /^[\u0000-\u0020]*[=+\-@\uFF1D\uFF0B\uFF0D\uFF20]/u.test(text)
+    ? `'${text}`
+    : text;
   return `"${formulaSafe.replaceAll('"', '""')}"`;
 }
 
@@ -82,7 +86,7 @@ body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:
 </style></head><body>
 <h1>${escapeHtml(title)}</h1><p>Generated locally from a Headmon backup. This report may contain sensitive health information.</p>
 <div class="summary"><div><strong>${sorted.length}</strong>days</div><div><strong>${episodeCount}</strong>episodes</div><div><strong>${migraineDays}</strong>migraine days</div></div>
-<button class="no-print" onclick="window.print()">Print or save as PDF</button>
+<p class="no-print">Use your browser’s Print command to print or save this report as a PDF.</p>
 <table><thead><tr><th>Date</th><th>Status</th><th>Episodes</th><th>Stress</th><th>Medication</th><th>Triggers</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table>
 </body></html>`;
 }

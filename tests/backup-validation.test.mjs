@@ -116,3 +116,62 @@ test("applies portable-schema defaults omitted by Android JSON serialization", a
   assert.equal(opened.diary.days[0].weatherCondition, "");
   assert.equal(opened.diary.omittedAttachmentCount, 0);
 });
+
+test("rejects extreme ZIP compression ratios before extraction", async () => {
+  const archive = zipSync({
+    "diary.json": strToU8("0".repeat(2 * 1024 * 1024)),
+  }, { level: 9 });
+
+  await assert.rejects(
+    openBackup(new File([archive], "compressed-bomb.zip")),
+    /unsafe compression ratio/i,
+  );
+});
+
+test("rejects malformed nested diary records without throwing an implementation error", async () => {
+  const malformed = {
+    ...diary,
+    days: [{
+      ...diary.days[0],
+      episodes: ["not-an-object"],
+    }],
+  };
+
+  await assert.rejects(
+    openBackup(new File([JSON.stringify(malformed)], "malformed-calendar.json")),
+    /malformed episodes/i,
+  );
+});
+
+test("rejects invalid attachment metadata before using it", async () => {
+  const manifest = {
+    format: "headmon-full-backup",
+    formatVersion: 1,
+    exportedAtEpochMillis: 1,
+    sourcePlatform: "ios",
+    diaryPath: "diary.json",
+    weatherHistoryPath: "weather-history.json",
+    attachments: [{
+      id: 42,
+      date: "2026-08-13",
+      episodeIndex: null,
+      mimeType: "image/jpeg",
+      addedAtEpochMillis: 1,
+      note: "",
+      path: "photos/42.jpg",
+      byteSize: 1,
+      sha256: "0".repeat(64),
+    }],
+  };
+  const archive = zipSync({
+    "manifest.json": strToU8(JSON.stringify(manifest)),
+    "diary.json": strToU8(JSON.stringify(diary)),
+    "weather-history.json": strToU8("[]"),
+    "photos/42.jpg": strToU8("x"),
+  }, { level: 0 });
+
+  await assert.rejects(
+    openBackup(new File([archive], "invalid-manifest.zip")),
+    /attachment manifest contains invalid values/i,
+  );
+});

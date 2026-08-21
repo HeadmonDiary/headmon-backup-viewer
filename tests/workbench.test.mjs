@@ -38,7 +38,15 @@ test("compares missing, matching, and conflicting dates", () => {
 });
 
 test("CSV export prevents spreadsheet formula execution", () => {
-  const csv = backupCsv([day("2026-08-17", "=HYPERLINK(\"https://example.invalid\")")]);
-  assert.match(csv, /'=HYPERLINK/);
-  assert.match(csv, /2026-08-17/);
+  for (const payload of [
+    "=HYPERLINK(\"https://example.invalid\")",
+    "   =1+1",
+    "\t@SUM(1,1)",
+    "\r-2+2",
+    "＋1+1",
+  ]) {
+    const csv = backupCsv([day("2026-08-17", payload)]);
+    assert.ok(csv.includes(`"'${payload.replaceAll('"', '""')}"`));
+    assert.match(csv, /2026-08-17/);
+  }
 });
